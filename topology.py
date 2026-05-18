@@ -14,11 +14,50 @@ Slice assignment:
   Slice C (Best Effort)    : H3 <-> H6  (10.0.0.3, 10.0.0.6)
 """
 
+import subprocess
+
 from mininet.net import Mininet
 from mininet.node import RemoteController, OVSSwitch
 from mininet.link import TCLink
 from mininet.log import setLogLevel, info
 from mininet.cli import CLI
+
+
+def setup_qos(bottleneck_port="s1-eth4"):
+    """S1-S2 병목 링크에 HTB QoS 큐 설정
+    큐 0: Slice A — 10Mbps 보장
+    큐 1: Slice B — 5Mbps 상한
+    큐 2: Slice C — 베스트 에포트 (100Mbps)
+    """
+    info("*** Cleaning up existing QoS settings\n")
+    subprocess.run(
+        f"ovs-vsctl clear port {bottleneck_port} qos",
+        shell=True, stderr=subprocess.DEVNULL)
+    subprocess.run(
+        "ovs-vsctl --all destroy qos; ovs-vsctl --all destroy queue",
+        shell=True, stderr=subprocess.DEVNULL)
+
+    info(f"*** Setting up HTB QoS on {bottleneck_port}\n")
+    cmd = (
+        f"ovs-vsctl set port {bottleneck_port} qos=@q "
+        f"-- --id=@q create QoS type=linux-htb "
+        f"other-config:max-rate=100000000 "
+        f"queues=0=@q0,1=@q1,2=@q2 "
+        f"-- --id=@q0 create Queue "
+        f"other-config:min-rate=10000000 other-config:max-rate=10000000 "
+        f"-- --id=@q1 create Queue "
+        f"other-config:max-rate=5000000 "
+        f"-- --id=@q2 create Queue "
+        f"other-config:max-rate=100000000"
+    )
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    if result.returncode == 0:
+        info("*** QoS setup complete\n")
+        info("    Queue 0 (Slice A): 10Mbps guaranteed\n")
+        info("    Queue 1 (Slice B): 5Mbps cap\n")
+        info("    Queue 2 (Slice C): best effort\n")
+    else:
+        info(f"*** QoS setup failed: {result.stderr}\n")
 
 
 def create_topology():
@@ -67,6 +106,9 @@ def create_topology():
     c0.start()
     s1.start([c0])
     s2.start([c0])
+
+    # QoS 설정 (네트워크 시작 후)
+    setup_qos("s1-eth4")
 
     info("*** Network started\n")
     info("\n")
