@@ -35,8 +35,16 @@ SLICE_MAP = {
 
 SLICE_NAMES = {0: 'Slice A (High)', 1: 'Slice B (Medium)', 2: 'Slice C (Best Effort)'}
 
-# S1-S2 병목 링크 포트 번호 (ovs-ofctl show s1 로 확인)
+# S1-S2 병목 링크 포트 번호 (topology.py addLink 순서 기준: h1,h2,h3,h4→s2,h5→s2,h6→s2,s1-s2)
 BOTTLENECK_PORT = 4  # s1-eth4
+
+# S1에서 병목 포트로 나가는 슬라이스별 규칙: (in_port, src_ip, dst_ip, queue_id)
+# topology.py addLink 순서: h1→s1-eth1(1), h2→s1-eth2(2), h3→s1-eth3(3), s2→s1-eth4(4)
+S1_SLICE_RULES = [
+    (1, '10.0.0.1', '10.0.0.4', 0),  # H1(eth1) → H4: Slice A, queue 0
+    (2, '10.0.0.2', '10.0.0.5', 1),  # H2(eth2) → H5: Slice B, queue 1
+    (3, '10.0.0.3', '10.0.0.6', 2),  # H3(eth3) → H6: Slice C, queue 2
+]
 
 
 class SliceController(app_manager.OSKenApp):
@@ -66,16 +74,37 @@ class SliceController(app_manager.OSKenApp):
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
-        """스위치 연결 시 table-miss 플로우 설치"""
+        """스위치 연결 시 table-miss 플로우 + S1 슬라이스 규칙 선제 설치"""
         datapath = ev.msg.datapath
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
-        # table-miss: 매칭 룰 없으면 컨트롤러로
+        # table-miss: 매칭 룰 없으면 컨트롤러로 (L2 학습용)
         match = parser.OFPMatch()
         actions = [parser.OFPActionOutput(
             ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
         self.add_flow(datapath, priority=0, match=match, actions=actions)
+
+        # S1에서만 슬라이스별 규칙을 스위치 연결 시점에 선제 설치.
+        # priority-2 catch-all 방식은 packet_in을 차단해 slice 규칙이 영영
+        # 설치되지 않는 버그를 일으킴 — 대신 priority-10으로 전체 쌍을 미리 설치.
+        if datapath.id == 1:
+            for in_port, src_ip, dst_ip, queue_id in S1_SLICE_RULES:
+                match = parser.OFPMatch(
+                    in_port=in_port,
+                    eth_type=ether_types.ETH_TYPE_IP,
+                    ipv4_src=src_ip,
+                    ipv4_dst=dst_ip
+                )
+                actions = [
+                    parser.OFPActionSetQueue(queue_id),
+                    parser.OFPActionOutput(BOTTLENECK_PORT)
+                ]
+                self.add_flow(datapath, priority=10, match=match,
+                              actions=actions, idle_timeout=0)
+                self.logger.info(
+                    "Pre-installed: port%d %s→%s queue=%d (%s)",
+                    in_port, src_ip, dst_ip, queue_id, SLICE_NAMES[queue_id])
 
         self.logger.info("Switch %s connected", datapath.id)
 
@@ -134,7 +163,7 @@ class SliceController(app_manager.OSKenApp):
                 ipv4_dst=dst_ip
             )
             self.add_flow(datapath, priority=10, match=match,
-                          actions=actions, idle_timeout=30)
+                          actions=actions, idle_timeout=0)
 
             self.logger.info(
                 "dpid=%s %s→%s → %s (queue=%d, port=%d)",
