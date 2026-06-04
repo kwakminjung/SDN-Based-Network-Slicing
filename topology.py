@@ -8,7 +8,7 @@ EC5209 Advanced Computer Networking, Spring 2026
 
 SFC 체인:
   URLLC: S1 → sedge → nfv_fw              → s_core → AutoDrive Hub
-  eMBB:  S1 → sedge → nfv_fw → nfv_cache  → s_core → EntertainPort
+  eMBB:  S1 → sedge → nfv_fw → nfv_cache  → s_core → EntertainPort (ent_port)
   mMTC:  S1 → sedge → nfv_fw → nfv_aggr   → s_core → CityPulse Hub
 
 지연 차이는 netem 주입이 아닌 경유 홉 수 차이에서 자연 발생.
@@ -133,7 +133,7 @@ def build_network():
 
     # 서버 (S_core 쪽)
     autodrive    = net.addHost("autodrive",    ip="10.0.0.4/24")
-    entertainport= net.addHost("entertainport",ip="10.0.0.5/24")
+    ent_port= net.addHost("ent_port",ip="10.0.0.5/24")
     citypulse    = net.addHost("citypulse",    ip="10.0.0.6/24")
 
     # NFV 호스트 (S_edge 쪽)
@@ -157,7 +157,7 @@ def build_network():
 
     # S_core ─ 서버 링크
     net.addLink(s_core, autodrive,     bw=1000)  # s_core-eth2
-    net.addLink(s_core, entertainport, bw=1000)  # s_core-eth3
+    net.addLink(s_core, ent_port, bw=1000)  # s_core-eth3
     net.addLink(s_core, citypulse,     bw=1000)  # s_core-eth4
 
     net.build()
@@ -178,7 +178,7 @@ def build_network():
         info(f"*** Started {nfv_name} ({nfv_info['description']})\n")
 
     # 서버 HTTP 리스너 (슬라이스 연결 확인용)
-    for srv_name in ("autodrive", "entertainport", "citypulse"):
+    for srv_name in ("autodrive", "ent_port", "citypulse"):
         net.get(srv_name).cmd(
             f"python3 -m http.server 8000 > /tmp/{srv_name}.log 2>&1 &")
 
@@ -192,7 +192,7 @@ def create_topology():
     info("\n*** Smart City SFC Network Slicing\n")
     info("  SFC Chains:\n")
     info("    URLLC: S1 → sedge → [nfv_fw]                  → s_core → AutoDrive Hub\n")
-    info("    eMBB:  S1 → sedge → [nfv_fw] → [nfv_cache]    → s_core → EntertainPort\n")
+    info("    eMBB:  S1 → sedge → [nfv_fw] → [nfv_cache]    → s_core → EntertainPort (ent_port)\n")
     info("    mMTC:  S1 → sedge → [nfv_fw] → [nfv_aggr]     → s_core → CityPulse Hub\n")
     info("  Dynamic client:\n")
     info("    py vehicle_02 = add_client(net, 'vehicle_02', s1)\n\n")

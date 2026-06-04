@@ -194,7 +194,7 @@ def build_help_panel(any_traffic: bool) -> Panel:
         notice = (
             "[bold yellow]⚡ 트래픽 없음 — Mininet CLI에서:[/bold yellow]\n"
             "  [white]autodrive    iperf3 -s -p 5001 &[/white]\n"
-            "  [white]entertainport iperf3 -s -p 5002 &[/white]\n"
+            "  [white]ent_port iperf3 -s -p 5002 &[/white]\n"
             "  [white]citypulse    iperf3 -s -p 5003 &[/white]\n"
             "  [white]vehicle_01   iperf3 -c 10.0.0.4 -p 5001 -u -b 15M -t 999 &[/white]\n"
             "  [white]camera_01    iperf3 -c 10.0.0.5 -p 5002 -u -b 30M -t 999 &[/white]\n"

@@ -68,7 +68,7 @@ SERVERS = {
         "s_core_port": 2,
         "description": "자율주행 / V2X 제어 서버",
     },
-    "entertainport": {
+    "ent_port": {
         "name": "EntertainPort",
         "ip": "10.0.0.5",
         "service": "embb",
@@ -132,7 +132,7 @@ DPID_SCORE = 3   # 코어 스위치 (서버들)
 #
 # S1 포트: vehicle_01=1, camera_01=2, sensor_01=3, sedge=4
 # S_edge 포트: s1=1, nfv_fw=2, nfv_cache=3, nfv_aggr=4, s_core=5
-# S_core 포트: sedge=1, autodrive=2, entertainport=3, citypulse=4
+# S_core 포트: sedge=1, autodrive=2, ent_port=3, citypulse=4
 # ---------------------------------------------------------------------------
 S1_PORT_SEDGE     = 4   # S1 → S_edge
 SEDGE_PORT_S1     = 1   # S_edge → S1
