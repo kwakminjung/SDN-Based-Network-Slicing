@@ -58,28 +58,28 @@ SERVICES = {
 CLASS_TO_SERVICE = {svc["htb_class"]: name for name, svc in SERVICES.items()}
 
 # ---------------------------------------------------------------------------
-# 서버 정의 (Score 스위치에 연결)
+# 서버 정의 (S_core 스위치에 연결)
 # ---------------------------------------------------------------------------
 SERVERS = {
     "autodrive": {
         "name": "AutoDrive Hub",
         "ip": "10.0.0.4",
         "service": "urllc",
-        "score_port": 2,
+        "s_core_port": 2,
         "description": "자율주행 / V2X 제어 서버",
     },
     "entertainport": {
         "name": "EntertainPort",
         "ip": "10.0.0.5",
         "service": "embb",
-        "score_port": 3,
+        "s_core_port": 3,
         "description": "HD 스트리밍 / CCTV 수신 서버",
     },
     "citypulse": {
         "name": "CityPulse Hub",
         "ip": "10.0.0.6",
         "service": "mmtc",
-        "score_port": 4,
+        "s_core_port": 4,
         "description": "IoT 센서 / 스마트미터 데이터 수집 서버",
     },
 }
@@ -131,16 +131,16 @@ DPID_SCORE = 3   # 코어 스위치 (서버들)
 # 포트 번호 (topology.py addLink 순서 기준)
 #
 # S1 포트: vehicle_01=1, camera_01=2, sensor_01=3, sedge=4
-# S_edge 포트: s1=1, nfv_fw=2, nfv_cache=3, nfv_aggr=4, score=5
-# Score 포트: sedge=1, autodrive=2, entertainport=3, citypulse=4
+# S_edge 포트: s1=1, nfv_fw=2, nfv_cache=3, nfv_aggr=4, s_core=5
+# S_core 포트: sedge=1, autodrive=2, entertainport=3, citypulse=4
 # ---------------------------------------------------------------------------
 S1_PORT_SEDGE     = 4   # S1 → S_edge
 SEDGE_PORT_S1     = 1   # S_edge → S1
 SEDGE_PORT_NFW    = 2   # S_edge → nfv_fw
 SEDGE_PORT_NCACHE = 3   # S_edge → nfv_cache
 SEDGE_PORT_NAGGR  = 4   # S_edge → nfv_aggr
-SEDGE_PORT_SCORE  = 5   # S_edge → Score
-SCORE_PORT_SEDGE  = 1   # Score → S_edge
+SEDGE_PORT_SCORE  = 5   # S_edge → S_core
+SCORE_PORT_SEDGE  = 1   # S_core → S_edge
 
 # NFV 이름 → S_edge 포트 매핑
 NFV_TO_SEDGE_PORT = {

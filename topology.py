@@ -4,12 +4,12 @@ SDN Network Slicing (SFC 버전) — Smart City Topology
 EC5209 Advanced Computer Networking, Spring 2026
 
 토폴로지:
-  클라이언트(S1) ── S_edge(NFV) ── Score(서버)
+  클라이언트(S1) ── S_edge(NFV) ── S_core(서버)
 
 SFC 체인:
-  URLLC: S1 → sedge → nfv_fw              → score → AutoDrive Hub
-  eMBB:  S1 → sedge → nfv_fw → nfv_cache  → score → EntertainPort
-  mMTC:  S1 → sedge → nfv_fw → nfv_aggr   → score → CityPulse Hub
+  URLLC: S1 → sedge → nfv_fw              → s_core → AutoDrive Hub
+  eMBB:  S1 → sedge → nfv_fw → nfv_cache  → s_core → EntertainPort
+  mMTC:  S1 → sedge → nfv_fw → nfv_aggr   → s_core → CityPulse Hub
 
 지연 차이는 netem 주입이 아닌 경유 홉 수 차이에서 자연 발생.
 HTB 큐는 GBR/MBR 보장 용도로만 사용.
@@ -123,7 +123,7 @@ def build_network():
                           dpid="0000000000000001")
     sedge = net.addSwitch("sedge", protocols="OpenFlow13",
                           dpid="0000000000000002")
-    score = net.addSwitch("score", protocols="OpenFlow13",
+    s_core = net.addSwitch("s_core", protocols="OpenFlow13",
                           dpid="0000000000000003")
 
     # 데모 클라이언트 (S1 쪽)
@@ -131,7 +131,7 @@ def build_network():
     camera_01    = net.addHost("camera_01",    ip="10.0.0.2/24")
     sensor_01    = net.addHost("sensor_01",    ip="10.0.0.3/24")
 
-    # 서버 (Score 쪽)
+    # 서버 (S_core 쪽)
     autodrive    = net.addHost("autodrive",    ip="10.0.0.4/24")
     entertainport= net.addHost("entertainport",ip="10.0.0.5/24")
     citypulse    = net.addHost("citypulse",    ip="10.0.0.6/24")
@@ -152,19 +152,19 @@ def build_network():
     net.addLink(sedge, nfv_fw,    bw=1000)   # sedge-eth2
     net.addLink(sedge, nfv_cache, bw=1000)   # sedge-eth3
     net.addLink(sedge, nfv_aggr,  bw=1000)   # sedge-eth4
-    # S_edge ─ Score 링크
-    net.addLink(sedge, score, bw=100)         # sedge-eth5, score-eth1
+    # S_edge ─ S_core 링크
+    net.addLink(sedge, s_core, bw=100)         # sedge-eth5, s_core-eth1
 
-    # Score ─ 서버 링크
-    net.addLink(score, autodrive,     bw=1000)  # score-eth2
-    net.addLink(score, entertainport, bw=1000)  # score-eth3
-    net.addLink(score, citypulse,     bw=1000)  # score-eth4
+    # S_core ─ 서버 링크
+    net.addLink(s_core, autodrive,     bw=1000)  # s_core-eth2
+    net.addLink(s_core, entertainport, bw=1000)  # s_core-eth3
+    net.addLink(s_core, citypulse,     bw=1000)  # s_core-eth4
 
     net.build()
     c0.start()
     s1.start([c0])
     sedge.start([c0])
-    score.start([c0])
+    s_core.start([c0])
 
     # HTB 큐 설정 (S1 → S_edge 병목)
     setup_qos(cfg.BOTTLENECK_IFACE)
@@ -191,9 +191,9 @@ def create_topology():
 
     info("\n*** Smart City SFC Network Slicing\n")
     info("  SFC Chains:\n")
-    info("    URLLC: S1 → sedge → [nfv_fw]                  → score → AutoDrive Hub\n")
-    info("    eMBB:  S1 → sedge → [nfv_fw] → [nfv_cache]    → score → EntertainPort\n")
-    info("    mMTC:  S1 → sedge → [nfv_fw] → [nfv_aggr]     → score → CityPulse Hub\n")
+    info("    URLLC: S1 → sedge → [nfv_fw]                  → s_core → AutoDrive Hub\n")
+    info("    eMBB:  S1 → sedge → [nfv_fw] → [nfv_cache]    → s_core → EntertainPort\n")
+    info("    mMTC:  S1 → sedge → [nfv_fw] → [nfv_aggr]     → s_core → CityPulse Hub\n")
     info("  Dynamic client:\n")
     info("    py vehicle_02 = add_client(net, 'vehicle_02', s1)\n\n")
 

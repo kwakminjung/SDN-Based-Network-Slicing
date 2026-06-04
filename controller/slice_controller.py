@@ -6,12 +6,12 @@ EC5209 Advanced Computer Networking, Spring 2026
 3개 스위치를 관리:
   S1    (dpid=1): 액세스 — HTB 큐 배정 + S_edge로 포워딩
   S_edge(dpid=2): 엣지   — SFC 라우팅 (in_port + dst_ip → NFV 경유)
-  Score (dpid=3): 코어   — 서버로 포워딩
+  S_core (dpid=3): 코어   — 서버로 포워딩
 
 SFC 체인 (S_edge 플로우 룰):
-  URLLC (dst=10.0.0.4): in_port=S1 → nfv_fw → score
-  eMBB  (dst=10.0.0.5): in_port=S1 → nfv_fw → nfv_cache → score
-  mMTC  (dst=10.0.0.6): in_port=S1 → nfv_fw → nfv_aggr  → score
+  URLLC (dst=10.0.0.4): in_port=S1 → nfv_fw → s_core
+  eMBB  (dst=10.0.0.5): in_port=S1 → nfv_fw → nfv_cache → s_core
+  mMTC  (dst=10.0.0.6): in_port=S1 → nfv_fw → nfv_aggr  → s_core
 
 REST API (포트 8080):
   GET  /slices              → 슬라이스 상태 + 연결 현황
@@ -112,7 +112,7 @@ class SliceController(app_manager.OSKenApp):
         elif dpid == cfg.DPID_SEDGE:
             self._install_sedge_sfc_rules(datapath)
         elif dpid == cfg.DPID_SCORE:
-            self._install_score_rules(datapath)
+            self._install_s_core_rules(datapath)
 
         self.logger.info("Switch dpid=%d connected", dpid)
 
@@ -154,15 +154,15 @@ class SliceController(app_manager.OSKenApp):
         각 서버 IP(= 슬라이스 식별자)와 in_port 조합으로 경로 결정:
           URLLC (dst=10.0.0.4):
             in_port=S1 → output(nfv_fw)
-            in_port=nfv_fw → output(score)
+            in_port=nfv_fw → output(s_core)
           eMBB (dst=10.0.0.5):
             in_port=S1 → output(nfv_fw)
             in_port=nfv_fw → output(nfv_cache)
-            in_port=nfv_cache → output(score)
+            in_port=nfv_cache → output(s_core)
           mMTC (dst=10.0.0.6):
             in_port=S1 → output(nfv_fw)
             in_port=nfv_fw → output(nfv_aggr)
-            in_port=nfv_aggr → output(score)
+            in_port=nfv_aggr → output(s_core)
         """
         parser = datapath.ofproto_parser
 
@@ -171,11 +171,11 @@ class SliceController(app_manager.OSKenApp):
             dst_ip  = server["ip"]
             queue_id = cfg.SERVICES[service]["queue_id"]
 
-            hops = chain + ["__score__"]   # 가상 마지막 홉
+            hops = chain + ["__s_core__"]   # 가상 마지막 홉
             prev_port = cfg.SEDGE_PORT_S1   # 첫 번째 규칙의 in_port = S1 포트
 
             for i, nfv_name in enumerate(hops):
-                if nfv_name == "__score__":
+                if nfv_name == "__s_core__":
                     out_port = cfg.SEDGE_PORT_SCORE
                 else:
                     out_port = cfg.NFV_TO_SEDGE_PORT[nfv_name]
@@ -197,16 +197,16 @@ class SliceController(app_manager.OSKenApp):
                 # 다음 룰의 in_port = 이번 out_port (NFV가 같은 포트로 되돌아오므로)
                 prev_port = out_port
 
-    def _install_score_rules(self, datapath):
-        """Score: dst_ip → 서버 포트로 포워딩."""
+    def _install_s_core_rules(self, datapath):
+        """S_core: dst_ip → 서버 포트로 포워딩."""
         parser = datapath.ofproto_parser
         for srv in cfg.SERVERS.values():
             match   = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP,
                                        ipv4_dst=srv["ip"])
-            actions = [parser.OFPActionOutput(srv["score_port"])]
+            actions = [parser.OFPActionOutput(srv["s_core_port"])]
             self.add_flow(datapath, priority=10, match=match, actions=actions)
-            self.logger.info("SCORE rule: dst=%s → port%d (%s)",
-                             srv["ip"], srv["score_port"], srv["name"])
+            self.logger.info("S_CORE rule: dst=%s → port%d (%s)",
+                             srv["ip"], srv["s_core_port"], srv["name"])
 
     def _queue_to_service(self, queue_id: int) -> str:
         for name, svc in cfg.SERVICES.items():

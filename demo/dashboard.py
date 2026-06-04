@@ -132,8 +132,8 @@ def build_connections_table(ctrl_state: dict) -> Table:
             label = SLICE_LABEL.get(svc, svc)
 
             chain = conn.get("sfc_chain", [])
-            # 예: [nfv_fw] → [nfv_cache] → score
-            chain_str = " → ".join(f"[{n}]" for n in chain) + " → score"
+            # 예: [nfv_fw] → [nfv_cache] → s_core
+            chain_str = " → ".join(f"[{n}]" for n in chain) + " → s_core"
 
             table.add_row(
                 f"[{color}]{emoji} {conn['name']}[/{color}]",
@@ -206,9 +206,9 @@ def build_help_panel(any_traffic: bool) -> Panel:
     txt = (
         notice +
         "[bold cyan]SFC 체인 확인[/bold cyan]\n"
-        "  URLLC: S1 → [nfv_fw]                → score → AutoDrive Hub\n"
-        "  eMBB:  S1 → [nfv_fw] → [nfv_cache]  → score → EntertainPort\n"
-        "  mMTC:  S1 → [nfv_fw] → [nfv_aggr]   → score → CityPulse Hub\n\n"
+        "  URLLC: S1 → [nfv_fw]                → s_core → AutoDrive Hub\n"
+        "  eMBB:  S1 → [nfv_fw] → [nfv_cache]  → s_core → EntertainPort\n"
+        "  mMTC:  S1 → [nfv_fw] → [nfv_aggr]   → s_core → CityPulse Hub\n\n"
         "[bold cyan]동적 클라이언트 (Mininet CLI)[/bold cyan]\n"
         "  [white]py vehicle_02 = add_client(net, 'vehicle_02', s1)[/white]\n"
         "  [white]py camera_02  = add_client(net, 'camera_02',  s1)[/white]"
