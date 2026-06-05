@@ -90,7 +90,7 @@ def add_client(net, name: str, switch, ip: str = None,
         py add_client(net, 'device_01', s1, requirements='latency < 5ms, bandwidth 8Mbps')
     """
     if ip is None:
-        existing_dynamic = [h for h in net.hosts if h.IP().startswith("10.0.0.")]
+        existing_dynamic = [h for h in net.hosts if h.IP() and h.IP().startswith("10.0.0.")]
         idx = len(existing_dynamic) + 1
         ip = f"10.0.0.{idx}/24"
 
