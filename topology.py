@@ -64,13 +64,16 @@ def setup_qos(iface: str = cfg.BOTTLENECK_IFACE):
         info(f"*** QoS setup failed: {result.stderr}\n")
 
 
-def register_client(name: str, ip: str) -> bool:
-    """컨트롤러에 클라이언트 hostname 등록."""
+def register_client(name: str, ip: str, requirements: str = "") -> bool:
+    """컨트롤러에 클라이언트 hostname 및 요구사항 등록."""
     import requests
     try:
+        payload = {"name": name, "ip": ip}
+        if requirements:
+            payload["requirements"] = requirements
         resp = requests.post(
             f"http://{cfg.CONTROLLER_HOST}:{cfg.CONTROLLER_PORT}/clients/register",
-            json={"name": name, "ip": ip},
+            json=payload,
             timeout=3,
         )
         return resp.ok
@@ -78,12 +81,13 @@ def register_client(name: str, ip: str) -> bool:
         return False
 
 
-def add_client(net, name: str, switch, ip: str = None) -> object:
+def add_client(net, name: str, switch, ip: str = None,
+               requirements: str = "") -> object:
     """런타임에 클라이언트 동적 추가.
 
     Mininet CLI에서:
-        py vehicle_02 = add_client(net, 'vehicle_02', s1)
-        py vehicle_02.cmd('ping 10.0.0.4 &')
+        py add_client(net, 'device_01', s1)
+        py add_client(net, 'device_01', s1, requirements='latency < 5ms, bandwidth 8Mbps')
     """
     if ip is None:
         existing_dynamic = [h for h in net.hosts if h.IP().startswith("10.0.0.")]
@@ -99,7 +103,7 @@ def add_client(net, name: str, switch, ip: str = None) -> object:
     switch.attach(link.intf2)
 
     raw_ip = ip.split("/")[0]
-    ok = register_client(name, raw_ip)
+    ok = register_client(name, raw_ip, requirements)
 
     service, rule_based = cfg.classify_hostname(name)
     server = cfg.get_server_for_service(service)

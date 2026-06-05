@@ -135,7 +135,8 @@ def parse_json_response(response: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 def classify_new_host(hostname: str,
-                      pkt_info: dict | None = None) -> str | None:
+                      pkt_info: dict | None = None,
+                      requirements: str = "") -> str | None:
     """hostname prefix로 분류 불가능한 경우 Gemma3에 판단 위임.
 
     hostname prefix가 명확한 경우는 컨트롤러에서 직접 처리하므로
@@ -152,8 +153,10 @@ def classify_new_host(hostname: str,
     if is_rule_based:
         return service
 
-    pkt_info = pkt_info or {}
-    protocol = pkt_info.get("protocol", "Unknown")
+    pkt_info  = pkt_info or {}
+    protocol  = pkt_info.get("protocol", "Unknown")
+    dst_port  = pkt_info.get("dst_port")
+    pkt_size  = pkt_info.get("pkt_size", 0)
 
     svc_list = "\n".join(
         f"  {name.upper()}: {svc['description']} "
@@ -161,17 +164,24 @@ def classify_new_host(hostname: str,
         for name, svc in cfg.SERVICES.items()
     )
 
+    port_line = f"  Destination Port: {dst_port}\n" if dst_port else ""
+    size_line = f"  Packet Size: {pkt_size} bytes\n" if pkt_size else ""
+    req_line  = f"  Requirements: {requirements}\n" if requirements else ""
+
     prompt = (
-        "당신은 SDN 스마트 시티 네트워크 관리자입니다.\n\n"
-        "## 신규 클라이언트 정보\n"
-        f"  호스트명: {hostname}\n"
-        f"  프로토콜: {protocol}\n\n"
-        "## 슬라이스 옵션\n"
+        "You are an SDN smart city network manager.\n\n"
+        "## New Client Information\n"
+        f"  Hostname: {hostname}\n"
+        f"  Protocol: {protocol}\n"
+        f"{port_line}"
+        f"{size_line}"
+        f"{req_line}"
+        "\n## Slice Options\n"
         f"{svc_list}\n\n"
-        "hostname prefix로 슬라이스를 결정할 수 없습니다.\n"
-        "호스트명과 트래픽 패턴을 분석해 가장 적합한 슬라이스를 선택하고 "
-        "아래 JSON 형식으로만 응답하시오:\n"
-        '{"service": "urllc" | "embb" | "mmtc", "reason": "한 문장"}'
+        "The hostname prefix does not match any known classification rule.\n"
+        "Based on the hostname, traffic pattern, and requirements, select the most "
+        "appropriate slice and respond in JSON only:\n"
+        '{"service": "urllc" | "embb" | "mmtc", "reason": "one sentence"}'
     )
 
     log.info("Gemma3 분류 요청 (모호한 hostname): %s", hostname)
@@ -238,26 +248,26 @@ def handle_service_request(host_ip: str, requested_service: str,
     server    = cfg.get_server_for_service(requested_service)
     chain     = " → ".join(cfg.get_sfc_chain(requested_service))
 
-    lines = ["당신은 SDN 네트워크 슬라이스 관리자입니다.\n", "## 현재 슬라이스 상태\n"]
+    lines = ["You are an SDN network slice manager.\n", "## Current Slice Status\n"]
     for svc_name, svc in cfg.SERVICES.items():
         mbps = current_loads.get(svc_name, 0)
         util = mbps / svc["mbr_mbps"] * 100 if svc["mbr_mbps"] > 0 else 0
         clients = current_state.get("slices", {}).get(svc_name, {}).get("clients", [])
-        host_str = ", ".join(c["name"] for c in clients) or "없음"
+        host_str = ", ".join(c["name"] for c in clients) or "none"
         lines.append(
             f"{svc_name.upper()} (GBR {svc['gbr_mbps']}-{svc['mbr_mbps']}Mbps, "
             f"SFC: {' → '.join(cfg.SFC_CHAINS[svc_name])})\n"
-            f"  현재 부하: {mbps:.1f}Mbps ({util:.0f}%)  사용 호스트: {host_str}\n"
+            f"  Load: {mbps:.1f}Mbps ({util:.0f}%)  Hosts: {host_str}\n"
         )
 
     lines.append(
-        f"\n## 요청\n"
-        f"{host_name}({host_ip})가 {requested_service.upper()} 요청 "
+        f"\n## Request\n"
+        f"{host_name} ({host_ip}) requests {requested_service.upper()} "
         f"(SLA: GBR {svc_info['gbr_mbps']}Mbps, PDB {svc_info['pdb_ms']}ms, "
         f"SFC: {chain} → {server['name']})\n\n"
-        "요청 슬라이스 수용 가능 여부 판단 후 JSON으로만 응답:\n"
+        "Decide whether to accept the requested slice and respond in JSON only:\n"
         '{"action":"assign"|"assign_alternative"|"reassign_and_assign"|"reject",'
-        '"reason":"한 문장","changes":[{"host_ip":"10.x.x.x","to_service":"urllc|embb|mmtc"}]}'
+        '"reason":"one sentence","changes":[{"host_ip":"10.x.x.x","to_service":"urllc|embb|mmtc"}]}'
     )
 
     prompt = "\n".join(lines)
@@ -289,7 +299,7 @@ def _rule_based_assignment(host_ip: str, requested_service: str,
 
     if util < 0.8:
         return {"action": "assign",
-                "reason": f"{requested_service.upper()} 슬라이스 여유 ({util*100:.0f}%)",
+                "reason": f"{requested_service.upper()} slice has capacity ({util*100:.0f}% used)",
                 "changes": [{"host_ip": host_ip, "to_service": requested_service}]}
 
     for alt in ["mmtc", "embb", "urllc"]:
@@ -298,10 +308,10 @@ def _rule_based_assignment(host_ip: str, requested_service: str,
         alt_util = loads.get(alt, 0) / cfg.SERVICES[alt]["mbr_mbps"]
         if alt_util < 0.8:
             return {"action": "assign_alternative",
-                    "reason": f"{requested_service.upper()} 포화 → {alt.upper()} 대안 배정",
+                    "reason": f"{requested_service.upper()} saturated — assigning {alt.upper()} as alternative",
                     "changes": [{"host_ip": host_ip, "to_service": alt}]}
 
-    return {"action": "reject", "reason": "모든 슬라이스 포화", "changes": []}
+    return {"action": "reject", "reason": "All slices saturated", "changes": []}
 
 
 # ---------------------------------------------------------------------------
@@ -310,26 +320,26 @@ def _rule_based_assignment(host_ip: str, requested_service: str,
 
 def build_sla_prompt(throughput: dict, violations: list[dict],
                      ctrl_state: dict) -> str:
-    lines = ["현재 네트워크 슬라이스 상태 (SFC 버전):\n"]
+    lines = ["Current network slice status (SFC version):\n"]
     for service, svc in cfg.SERVICES.items():
         mbps  = throughput.get(service, 0)
         chain = " → ".join(cfg.SFC_CHAINS[service])
-        status = "✅ 정상"
+        status = "OK"
         for v in violations:
             if v["service"] == service:
-                status = f"⚠️ GBR 위반 ({mbps}Mbps < {svc['gbr_mbps']}Mbps)"
+                status = f"GBR VIOLATION ({mbps}Mbps < {svc['gbr_mbps']}Mbps)"
 
         clients = ctrl_state.get("slices", {}).get(service, {}).get("clients", [])
-        host_str = ", ".join(c["name"] for c in clients) or "없음"
+        host_str = ", ".join(c["name"] for c in clients) or "none"
 
         lines.append(
             f"{service.upper()} (GBR {svc['gbr_mbps']}Mbps, SFC: {chain})\n"
-            f"  현재: {mbps}Mbps  호스트: {host_str}  상태: {status}\n"
+            f"  Current: {mbps}Mbps  Hosts: {host_str}  Status: {status}\n"
         )
 
     lines.append(
-        "\nSLA 위반을 해소할 재배정 방안을 JSON으로 응답:\n"
-        '{"action":"reassign_host"|"no_action","reason":"한 문장",'
+        "\nPropose a reassignment plan to resolve the SLA violation. Respond in JSON only:\n"
+        '{"action":"reassign_host"|"no_action","reason":"one sentence",'
         '"changes":[{"host_ip":"10.x.x.x","to_service":"urllc|embb|mmtc"}]}'
     )
     return "\n".join(lines)
@@ -381,10 +391,10 @@ def _fallback_sla_action(violations: list[dict]) -> dict:
                 if profile["service"] == "embb":
                     return {
                         "action": "reassign_host",
-                        "reason": "URLLC GBR 위반 — eMBB 호스트를 mMTC로 강등",
+                        "reason": "URLLC GBR violation — demoting eMBB host to mMTC to free bandwidth",
                         "changes": [{"host_ip": profile["ip"], "to_service": "mmtc"}],
                     }
-    return {"action": "no_action", "reason": "규칙 기반 조치 없음", "changes": []}
+    return {"action": "no_action", "reason": "No rule-based action applicable", "changes": []}
 
 
 def main():
