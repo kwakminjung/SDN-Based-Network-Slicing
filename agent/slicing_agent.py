@@ -103,12 +103,14 @@ def detect_violations(throughput: dict[str, float]) -> list[dict]:
 
 def ask_gemma(prompt: str) -> str | None:
     try:
+        t0 = time.perf_counter()
         resp = requests.post(
             cfg.OLLAMA_URL,
             json={"model": cfg.OLLAMA_MODEL, "prompt": prompt, "stream": False},
             timeout=60,
         )
         resp.raise_for_status()
+        log.info("Gemma3 latency: %.2f s", time.perf_counter() - t0)
         return resp.json().get("response", "")
     except requests.exceptions.ConnectionError:
         log.warning("Ollama 연결 실패 — localhost:11434 에서 실행 중인지 확인")
