@@ -1,5 +1,7 @@
 # SDN-Based Network Slicing — Smart City SFC
 
+Language: [한국어](README.md) | **English**
+
 **EC5209 Advanced Computer Networking, Spring 2026 — GIST EECS**  
 Minjung Kwak (20261053), Dept. of AI Convergence
 
