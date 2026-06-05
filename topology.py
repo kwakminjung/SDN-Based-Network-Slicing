@@ -86,13 +86,16 @@ def add_client(net, name: str, switch, ip: str = None) -> object:
         py vehicle_02.cmd('ping 10.0.0.4 &')
     """
     if ip is None:
-        existing_dynamic = [h for h in net.hosts if h.ip.startswith("10.0.1.")]
+        existing_dynamic = [h for h in net.hosts if h.IP().startswith("10.0.0.")]
         idx = len(existing_dynamic) + 1
-        ip = f"10.0.1.{idx}/24"
+        ip = f"10.0.0.{idx}/24"
 
     host = net.addHost(name, ip=ip)
     link = net.addLink(host, switch, bw=1000)
+
+    host.cmd(f"ip addr add {ip} dev {name}-eth0")
     host.cmd(f"ifconfig {name}-eth0 up")
+    host.cmd(f"ip route add 10.0.0.0/24 dev {name}-eth0")
     switch.attach(link.intf2)
 
     raw_ip = ip.split("/")[0]
@@ -182,12 +185,12 @@ def build_network():
         net.get(srv_name).cmd(
             f"python3 -m http.server 8000 > /tmp/{srv_name}.log 2>&1 &")
 
-    return net
+    return net, s1
 
 
 def create_topology():
     """CLI 모드."""
-    net = build_network()
+    net, s1 = build_network()
 
     info("\n*** Smart City SFC Network Slicing\n")
     info("  SFC Chains:\n")
@@ -197,6 +200,10 @@ def create_topology():
     info("  Dynamic client:\n")
     info("    py vehicle_02 = add_client(net, 'vehicle_02', s1)\n\n")
 
+    import builtins
+    builtins.add_client = add_client
+    builtins.net = net
+    builtins.s1 = s1
     CLI(net)
 
     info("*** Stopping network\n")
@@ -207,7 +214,7 @@ def create_topology_and_measure():
     """측정 모드."""
     from measurement.run_measurement import run_measurement
 
-    net = build_network()
+    net, s1 = build_network()
     info("*** Waiting for controller to install flows...\n")
     net.pingAll(timeout=2)
     time.sleep(3)

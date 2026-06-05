@@ -15,6 +15,12 @@ import subprocess
 import logging
 from datetime import datetime
 
+try:
+    from scapy.all import sniff, sendp, IP, Ether, get_if_hwaddr
+except ImportError:
+    log.error("[%s] scapy not installed. Run: pip install scapy", nfv_name)
+    sys.exit(1)
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import config as cfg
 
@@ -29,11 +35,6 @@ log = logging.getLogger(__name__)
 
 def run_nfv(nfv_name: str):
     """NFV 경유 노드 메인 루프."""
-    try:
-        from scapy.all import sniff, sendp, IP, get_if_hwaddr
-    except ImportError:
-        log.error("[%s] scapy not installed. Run: pip install scapy", nfv_name)
-        sys.exit(1)
 
     iface    = f"{nfv_name}-eth0"
     own_mac  = get_if_hwaddr(iface)
@@ -65,6 +66,7 @@ def run_nfv(nfv_name: str):
                  nfv_name, ts, src_ip, dst_ip, service, server_name)
         sys.stdout.flush()
 
+        pkt[Ether].src = own_mac  # src MAC을 자신의 인터페이스 MAC으로 변경
         # 동일 인터페이스로 재전송 — S_edge가 in_port=nfv 포트로 다음 홉 결정
         sendp(pkt, iface=iface, verbose=False)
 

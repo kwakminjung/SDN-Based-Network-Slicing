@@ -133,7 +133,7 @@ def build_connections_table(ctrl_state: dict) -> Table:
 
             chain = conn.get("sfc_chain", [])
             # 예: [nfv_fw] → [nfv_cache] → s_core
-            chain_str = " → ".join(f"[{n}]" for n in chain) + " → s_core"
+            chain_str = " → ".join(f"\\[{n}]" for n in chain) + " → s_core"
 
             table.add_row(
                 f"[{color}]{emoji} {conn['name']}[/{color}]",
