@@ -404,5 +404,4 @@ OVS always sets the HTB default to Queue 0 regardless of the `default-queue` set
 | Branch | Contents |
 |--------|---------|
 | `main` | Baseline implementation (S1–S2, HTB + netem, static slices) |
-| `feature/agent` | Gemma3 agent + request-based assignment + demo UI |
 | `feature/sfc` | **SFC-based redesign** — physical NFV transit + dynamic hostname classification + verified |
