@@ -7,7 +7,7 @@ Minjung Kwak (20261053), Dept. of AI Convergence
 
 This project implements 5G-style network slicing for a smart city scenario using Mininet, os-ken (OpenFlow 1.3), and OVS HTB queuing.  
 The key idea is that **each slice physically traverses a different NFV chain (Service Function Chaining)**. Latency differentiation arises naturally from hop count differences, not from injected netem delays.  
-Clients do not specify a slice. The Gemma3 agent automatically assigns one based on the client's hostname.
+Clients do not specify a slice. The Gemma3 agent automatically assigns one based on hostname, traffic pattern, and client requirements.
 
 ---
 
@@ -81,7 +81,7 @@ Clients do not select a slice manually. The slice is assigned automatically base
 | Python | 3.10.14 (pyenv virtualenv: `sdn-env`) |
 | Data plane / QoS | Open vSwitch 3.3.4 — HTB queuing (no netem) |
 | NFV | Python + scapy (promiscuous receive + forward) |
-| AI agent | Gemma3 via Ollama (invoked only for ambiguous hostnames or SLA violations) |
+| AI agent | Gemma3 via Ollama `/api/chat` (system/user role separation) |
 | Measurement | iperf v2 (UDP throughput), ping (RTT) |
 | Dashboard | Python rich (real-time SFC path display) |
 
@@ -104,7 +104,7 @@ SDN-Based-Network-Slicing/
 │   ├── l2_switch.py             # Baseline L2 forwarding controller
 │   └── slice_controller.py      # SFC controller (3 switches + REST API)
 ├── agent/
-│   └── slicing_agent.py         # Gemma3 agent (ambiguous hostname + SLA reassignment)
+│   └── slicing_agent.py         # Gemma3 agent (classification + SLA monitoring)
 ├── demo/
 │   ├── dashboard.py             # Real-time TUI (SFC path + GBR status)
 │   └── request_injector.py      # Interactive service request terminal
@@ -126,6 +126,8 @@ Client (vehicle_01)
 │  S1: hostname lookup → classify_hostname()           │
 │    Clear prefix  → install HTB queue + flow rule     │
 │    Ambiguous     → async Gemma3 classification       │
+│      inputs: hostname + protocol + dst_port          │
+│              + pkt_size + requirements               │
 │                                                      │
 │  S_edge: SFC rules (in_port + dst_ip → NFV routing)  │
 │    URLLC: in_port=S1 → nfv_fw → s_core              │
@@ -172,7 +174,7 @@ in_port=nfv_fw_port,   dst=10.0.0.6 → output(nfv_aggr_port)
 in_port=nfv_aggr_port, dst=10.0.0.6 → output(s_core_port)
 ```
 
-Each NFV script receives a packet, logs it, and **re-sends it on the same interface**. S_edge then identifies `in_port=nfv_port` and routes to the next hop.
+Each NFV script receives a packet, logs it, and **re-sends it on the same interface**. S_edge identifies `in_port=nfv_port` and routes to the next hop.
 
 ### HTB Queue Configuration (`s1-eth4`, S1 → S_edge)
 
@@ -208,6 +210,46 @@ No netem. Latency differences emerge naturally from the SFC hop count.
 | GBR violation detected | Gemma3 queried for reassignment decision |
 | Explicit `/slices/request` call | Gemma3 selects optimal slice based on current load |
 
+### Inputs for Ambiguous Hostname Classification
+
+For clients with no matching prefix, the following information is automatically extracted from the first Packet-In and combined with user-declared requirements.
+
+| Input | Source | Example |
+|-------|--------|---------|
+| hostname | Client registration | `device_01` |
+| protocol | Packet-In (IP header) | `UDP` |
+| dst_port | Packet-In (TCP/UDP header) | `1234` |
+| pkt_size | Packet-In (`len(msg.data)`) | `64 bytes` |
+| requirements | `add_client(requirements=...)` | `latency < 5ms, bandwidth 8Mbps` |
+
+### System / User Message Separation
+
+Uses Ollama `/api/chat` endpoint to separate roles.
+
+```python
+messages = [
+    {
+        "role": "system",
+        # Fixed instructions — role definition, slice descriptions, JSON output format
+        "content": "You are an SDN smart city network manager ..."
+    },
+    {
+        "role": "user",
+        # Per-request data — hostname, traffic pattern, current load
+        "content": "Hostname: device_01\nProtocol: UDP\n..."
+    }
+]
+```
+
+All prompts are written in English for better accuracy and response speed with Gemma3.
+
+### Gemma3 Response Time
+
+Measured inside `ask_gemma()` and logged for every call:
+```
+Gemma3 latency: 2.34 s
+```
+
 ### Example (Controller Log)
 
 ```
@@ -227,7 +269,7 @@ Gemma3 override: device_01 → urllc (was mmtc)
 | GET | `/slices` | Slice state + SFC chains + active connections |
 | POST | `/slices/reassign` | Direct reassignment (applied immediately) |
 | POST | `/slices/request` | Gemma3 load-aware optimal slice assignment |
-| POST | `/clients/register` | Register client hostname (called automatically by topology.py) |
+| POST | `/clients/register` | Register client hostname + requirements |
 
 ---
 
@@ -325,13 +367,14 @@ mininet> sensor_01 iperf -c 10.0.0.6 -u -p 6003 -b 10M -t 5
 ### 7. Dynamic Client Addition (Mininet CLI)
 
 ```python
-# Slice assigned automatically from hostname prefix (no Gemma3 call)
 # add_client / net / s1 are injected into builtins — usable directly from py
+
+# Slice assigned automatically from hostname prefix (no Gemma3 call)
 py add_client(net, 'vehicle_02', s1)   # → 10.0.0.7, assigned URLLC
 py add_client(net, 'camera_02',  s1)   # → 10.0.0.8, assigned eMBB
 
-# Ambiguous hostname → mmtc default, then Gemma3 async override
-py add_client(net, 'device_01',  s1)   # → Gemma3 decides slice
+# Ambiguous hostname + requirements → Gemma3 decides slice
+py add_client(net, 'device_01', s1, requirements='latency < 5ms, bandwidth 8Mbps')
 ```
 
 ### 8. Verification
@@ -365,12 +408,12 @@ iperf v2 UDP, 2026-06-05 (RISENUC15-01):
 
 ### iperf3 Incompatibility with Mininet Namespaces
 
-iperf3 fails at the cookie handshake step (`unable to receive cookie at server`) in Mininet. The repeated round-trip exchange between namespaces on the same physical host exceeds iperf3's internal timeout.  
+iperf3 fails at the cookie handshake step in Mininet.  
 **Fix**: Use **iperf v2**, which has no cookie handshake and works reliably in Mininet.
 
 ### scapy Installation
 
-NFV scripts run under the system Python interpreter inside Mininet namespaces. A virtualenv-local `pip install scapy` is not visible there.  
+NFV scripts run under the system Python interpreter inside Mininet namespaces.  
 **Fix**: `sudo apt install python3-scapy` to install as a system package.
 
 ### NFV Re-receive Loop Prevention
@@ -404,4 +447,4 @@ OVS always sets the HTB default to Queue 0 regardless of the `default-queue` set
 | Branch | Contents |
 |--------|---------|
 | `main` | Baseline implementation (S1–S2, HTB + netem, static slices) |
-| `feature/sfc` | **SFC-based redesign** — physical NFV transit + dynamic hostname classification + verified |
+| `feature/sfc` | **SFC-based redesign** — physical NFV transit + Gemma3 auto-classification + verified |

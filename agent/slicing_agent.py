@@ -98,20 +98,57 @@ def detect_violations(throughput: dict[str, float]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Gemma3 호출
+# Gemma3 호출 (system / user 분리, /api/chat 엔드포인트)
 # ---------------------------------------------------------------------------
 
-def ask_gemma(prompt: str) -> str | None:
+# ── 고정 system 프롬프트 ──────────────────────────────────────────────────
+_SYSTEM_CLASSIFY = (
+    "You are an SDN smart city network manager responsible for assigning "
+    "new clients to the correct network slice.\n"
+    "Available slices: URLLC (ultra-low latency, e.g. autonomous vehicles, V2X), "
+    "eMBB (high bandwidth, e.g. HD streaming, CCTV), "
+    "mMTC (massive IoT, e.g. sensors, smart meters).\n"
+    "Respond in JSON only — no text outside the JSON object:\n"
+    '{"service": "urllc" | "embb" | "mmtc", "reason": "one sentence"}'
+)
+
+_SYSTEM_REQUEST = (
+    "You are an SDN network slice manager responsible for accepting or redirecting "
+    "client slice requests based on current network load.\n"
+    "Respond in JSON only — no text outside the JSON object:\n"
+    '{"action": "assign" | "assign_alternative" | "reassign_and_assign" | "reject", '
+    '"reason": "one sentence", '
+    '"changes": [{"host_ip": "10.x.x.x", "to_service": "urllc|embb|mmtc"}]}'
+)
+
+_SYSTEM_SLA = (
+    "You are an SDN network slice manager responsible for resolving GBR SLA violations "
+    "by reassigning clients to less congested slices.\n"
+    "Respond in JSON only — no text outside the JSON object:\n"
+    '{"action": "reassign_host" | "no_action", "reason": "one sentence", '
+    '"changes": [{"host_ip": "10.x.x.x", "to_service": "urllc|embb|mmtc"}]}'
+)
+
+
+def ask_gemma(system: str, user: str) -> str | None:
+    """Ollama /api/chat 호출 (system/user role 분리)."""
     try:
         t0 = time.perf_counter()
         resp = requests.post(
             cfg.OLLAMA_URL,
-            json={"model": cfg.OLLAMA_MODEL, "prompt": prompt, "stream": False},
+            json={
+                "model": cfg.OLLAMA_MODEL,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user",   "content": user},
+                ],
+                "stream": False,
+            },
             timeout=60,
         )
         resp.raise_for_status()
         log.info("Gemma3 latency: %.2f s", time.perf_counter() - t0)
-        return resp.json().get("response", "")
+        return resp.json().get("message", {}).get("content", "")
     except requests.exceptions.ConnectionError:
         log.warning("Ollama 연결 실패 — localhost:11434 에서 실행 중인지 확인")
         return None
@@ -168,8 +205,7 @@ def classify_new_host(hostname: str,
     size_line = f"  Packet Size: {pkt_size} bytes\n" if pkt_size else ""
     req_line  = f"  Requirements: {requirements}\n" if requirements else ""
 
-    prompt = (
-        "You are an SDN smart city network manager.\n\n"
+    user = (
         "## New Client Information\n"
         f"  Hostname: {hostname}\n"
         f"  Protocol: {protocol}\n"
@@ -178,14 +214,12 @@ def classify_new_host(hostname: str,
         f"{req_line}"
         "\n## Slice Options\n"
         f"{svc_list}\n\n"
-        "The hostname prefix does not match any known classification rule.\n"
-        "Based on the hostname, traffic pattern, and requirements, select the most "
-        "appropriate slice and respond in JSON only:\n"
-        '{"service": "urllc" | "embb" | "mmtc", "reason": "one sentence"}'
+        "The hostname prefix does not match any known classification rule. "
+        "Select the most appropriate slice based on the information above."
     )
 
     log.info("Gemma3 분류 요청 (모호한 hostname): %s", hostname)
-    response = ask_gemma(prompt)
+    response = ask_gemma(_SYSTEM_CLASSIFY, user)
 
     if not response:
         log.warning("Gemma3 미응답 — 기본값 mmtc 사용")
@@ -248,7 +282,7 @@ def handle_service_request(host_ip: str, requested_service: str,
     server    = cfg.get_server_for_service(requested_service)
     chain     = " → ".join(cfg.get_sfc_chain(requested_service))
 
-    lines = ["You are an SDN network slice manager.\n", "## Current Slice Status\n"]
+    lines = ["## Current Slice Status\n"]
     for svc_name, svc in cfg.SERVICES.items():
         mbps = current_loads.get(svc_name, 0)
         util = mbps / svc["mbr_mbps"] * 100 if svc["mbr_mbps"] > 0 else 0
@@ -265,14 +299,12 @@ def handle_service_request(host_ip: str, requested_service: str,
         f"{host_name} ({host_ip}) requests {requested_service.upper()} "
         f"(SLA: GBR {svc_info['gbr_mbps']}Mbps, PDB {svc_info['pdb_ms']}ms, "
         f"SFC: {chain} → {server['name']})\n\n"
-        "Decide whether to accept the requested slice and respond in JSON only:\n"
-        '{"action":"assign"|"assign_alternative"|"reassign_and_assign"|"reject",'
-        '"reason":"one sentence","changes":[{"host_ip":"10.x.x.x","to_service":"urllc|embb|mmtc"}]}'
+        "Decide whether to accept the requested slice."
     )
 
-    prompt = "\n".join(lines)
+    user = "\n".join(lines)
     log.info("Gemma3 배정 판단 요청...")
-    response = ask_gemma(prompt)
+    response = ask_gemma(_SYSTEM_REQUEST, user)
 
     if response:
         action = parse_json_response(response)
@@ -318,9 +350,10 @@ def _rule_based_assignment(host_ip: str, requested_service: str,
 # 3. SLA 모니터링 루프 (주기적 자동 재배정)
 # ---------------------------------------------------------------------------
 
-def build_sla_prompt(throughput: dict, violations: list[dict],
-                     ctrl_state: dict) -> str:
-    lines = ["Current network slice status (SFC version):\n"]
+def build_sla_user(throughput: dict, violations: list[dict],
+                   ctrl_state: dict) -> str:
+    """SLA 모니터링용 user 메시지 생성 (system은 _SYSTEM_SLA 상수 사용)."""
+    lines = ["## Current Network Slice Status\n"]
     for service, svc in cfg.SERVICES.items():
         mbps  = throughput.get(service, 0)
         chain = " → ".join(cfg.SFC_CHAINS[service])
@@ -337,11 +370,7 @@ def build_sla_prompt(throughput: dict, violations: list[dict],
             f"  Current: {mbps}Mbps  Hosts: {host_str}  Status: {status}\n"
         )
 
-    lines.append(
-        "\nPropose a reassignment plan to resolve the SLA violation. Respond in JSON only:\n"
-        '{"action":"reassign_host"|"no_action","reason":"one sentence",'
-        '"changes":[{"host_ip":"10.x.x.x","to_service":"urllc|embb|mmtc"}]}'
-    )
+    lines.append("\nPropose a reassignment plan to resolve the GBR violation.")
     return "\n".join(lines)
 
 
@@ -363,9 +392,9 @@ def run_once(dry_run: bool = False) -> None:
                     v["service"], v["actual_mbps"], v["expected_mbps"])
 
     ctrl_state = get_controller_state() or {}
-    prompt     = build_sla_prompt(throughput, violations, ctrl_state)
+    user       = build_sla_user(throughput, violations, ctrl_state)
     log.info("Gemma3 SLA 복구 방안 요청...")
-    response = ask_gemma(prompt)
+    response = ask_gemma(_SYSTEM_SLA, user)
 
     if response:
         action = parse_json_response(response)
