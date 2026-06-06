@@ -187,10 +187,10 @@ CONTROLLER_HOST = "localhost"
 CONTROLLER_PORT = 8080
 
 # ---------------------------------------------------------------------------
-# Ollama / Gemma3
+# Ollama / Gemma4
 # ---------------------------------------------------------------------------
-OLLAMA_URL   = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "gemma3"
+OLLAMA_URL   = "http://localhost:11434/api/chat"
+OLLAMA_MODEL = "gemma4"
 
 # ---------------------------------------------------------------------------
 # 에이전트
@@ -200,8 +200,8 @@ SLA_MARGIN         = 0.8   # GBR의 몇 %까지 허용 (0.8 = 20% 여유)
 
 # ---------------------------------------------------------------------------
 # hostname prefix → 슬라이스 자동 분류 규칙
-# prefix가 명확하면 Gemma3를 호출하지 않고 즉시 규칙 기반 처리.
-# prefix가 없거나 모호하면 Gemma3에게 판단 위임.
+# prefix가 명확하면 Gemma4를 호출하지 않고 즉시 규칙 기반 처리.
+# prefix가 없거나 모호하면 Gemma4에게 판단 위임.
 # ---------------------------------------------------------------------------
 HOSTNAME_RULES = [
     ("vehicle",   "urllc"),
@@ -223,14 +223,14 @@ def classify_hostname(hostname: str) -> tuple[str, bool]:
 
     Returns:
         (service, is_rule_based)
-        is_rule_based=True → Gemma3 불필요
-        is_rule_based=False → Gemma3 판단 필요
+        is_rule_based=True → Gemma4 불필요
+        is_rule_based=False → Gemma4 판단 필요
     """
     h = hostname.lower()
     for prefix, service in HOSTNAME_RULES:
         if h.startswith(prefix):
             return service, True
-    return "mmtc", False   # 모호한 hostname → 기본값 + Gemma3 판단 요청
+    return "mmtc", False   # 모호한 hostname → 기본값 + Gemma4 판단 요청
 
 def get_server_for_service(service: str) -> dict:
     return SERVICE_TO_SERVER.get(service, SERVICE_TO_SERVER["mmtc"])

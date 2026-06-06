@@ -28,6 +28,9 @@ from mininet.cli import CLI
 
 import config as cfg
 
+# 동적으로 할당된 IP를 추적 (h.IP()는 런타임 addHost 후 None 반환 버그 우회)
+_dynamic_ips: set[str] = set()
+
 
 def setup_qos(iface: str = cfg.BOTTLENECK_IFACE):
     """S1 → S_edge 병목 인터페이스에 HTB 큐 설정 (GBR/MBR 보장용)."""
@@ -64,13 +67,16 @@ def setup_qos(iface: str = cfg.BOTTLENECK_IFACE):
         info(f"*** QoS setup failed: {result.stderr}\n")
 
 
-def register_client(name: str, ip: str) -> bool:
-    """컨트롤러에 클라이언트 hostname 등록."""
+def register_client(name: str, ip: str, requirements: str = "") -> bool:
+    """컨트롤러에 클라이언트 hostname 및 요구사항 등록."""
     import requests
     try:
+        payload = {"name": name, "ip": ip}
+        if requirements:
+            payload["requirements"] = requirements
         resp = requests.post(
             f"http://{cfg.CONTROLLER_HOST}:{cfg.CONTROLLER_PORT}/clients/register",
-            json={"name": name, "ip": ip},
+            json=payload,
             timeout=3,
         )
         return resp.ok
@@ -78,17 +84,26 @@ def register_client(name: str, ip: str) -> bool:
         return False
 
 
-def add_client(net, name: str, switch, ip: str = None) -> object:
+def add_client(net, name: str, switch, ip: str = None,
+               requirements: str = "") -> object:
     """런타임에 클라이언트 동적 추가.
 
     Mininet CLI에서:
-        py vehicle_02 = add_client(net, 'vehicle_02', s1)
-        py vehicle_02.cmd('ping 10.0.0.4 &')
+        py add_client(net, 'device_01', s1)
+        py add_client(net, 'device_01', s1, requirements='latency < 5ms, bandwidth 8Mbps')
     """
+    global _dynamic_ips
     if ip is None:
-        existing_dynamic = [h for h in net.hosts if h.IP().startswith("10.0.0.")]
-        idx = len(existing_dynamic) + 1
+        static_ips = (
+            {p["ip"] for p in cfg.HOST_PROFILES.values()}
+            | {s["ip"] for s in cfg.SERVERS.values()}
+        )
+        used = static_ips | _dynamic_ips
+        idx = 7
+        while f"10.0.0.{idx}" in used:
+            idx += 1
         ip = f"10.0.0.{idx}/24"
+        _dynamic_ips.add(f"10.0.0.{idx}")
 
     host = net.addHost(name, ip=ip)
     link = net.addLink(host, switch, bw=1000)
@@ -99,7 +114,7 @@ def add_client(net, name: str, switch, ip: str = None) -> object:
     switch.attach(link.intf2)
 
     raw_ip = ip.split("/")[0]
-    ok = register_client(name, raw_ip)
+    ok = register_client(name, raw_ip, requirements)
 
     service, rule_based = cfg.classify_hostname(name)
     server = cfg.get_server_for_service(service)

@@ -16,7 +16,7 @@ SFC 체인 (S_edge 플로우 룰):
 REST API (포트 8080):
   GET  /slices              → 슬라이스 상태 + 연결 현황
   POST /slices/reassign     → 직접 재배정
-  POST /slices/request      → Gemma3 부하 기반 최적 배정
+  POST /slices/request      → Gemma4 부하 기반 최적 배정
   POST /clients/register    → hostname 등록 (topology.py에서 호출)
 """
 
@@ -32,7 +32,7 @@ from os_ken.controller import ofp_event
 from os_ken.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER
 from os_ken.controller.handler import set_ev_cls
 from os_ken.ofproto import ofproto_v1_3
-from os_ken.lib.packet import packet, ethernet, ipv4, ether_types
+from os_ken.lib.packet import packet, ethernet, ipv4, tcp, udp, ether_types
 from os_ken.lib import hub
 
 import eventlet
@@ -61,6 +61,8 @@ class SliceController(app_manager.OSKenApp):
 
         # hostname 레지스트리: ip → name
         self.ip_to_name: dict[str, str] = {}
+        # 요구사항 레지스트리: ip → requirements 문자열
+        self.ip_to_requirements: dict[str, str] = {}
         # 분류 캐시: ip → {name, service, server_ip, server_name, sfc_chain, in_port, ts}
         self.classified: dict[str, dict] = {}
         # 현재 호스트 서비스 배정 (재배정 반영)
@@ -86,6 +88,20 @@ class SliceController(app_manager.OSKenApp):
         mod  = parser.OFPFlowMod(datapath=datapath, priority=priority,
                                   match=match, instructions=inst,
                                   idle_timeout=idle_timeout)
+        datapath.send_msg(mod)
+
+    def delete_flow(self, datapath, priority, match):
+        """플로우 룰 삭제 (OFPFC_DELETE_STRICT — match 완전 일치)."""
+        ofproto = datapath.ofproto
+        parser  = datapath.ofproto_parser
+        mod = parser.OFPFlowMod(
+            datapath=datapath,
+            command=ofproto.OFPFC_DELETE_STRICT,
+            priority=priority,
+            match=match,
+            out_port=ofproto.OFPP_ANY,
+            out_group=ofproto.OFPG_ANY,
+        )
         datapath.send_msg(mod)
 
     # ------------------------------------------------------------------
@@ -242,7 +258,14 @@ class SliceController(app_manager.OSKenApp):
             src_ip = ip_pkt.src
             if (src_ip not in cfg.SERVER_IPS
                     and src_ip not in self.classified):
-                self._classify_and_install(datapath, src_ip, in_port, ip_pkt)
+                tcp_pkt = pkt.get_protocol(tcp.tcp)
+                udp_pkt = pkt.get_protocol(udp.udp)
+                dst_port = (tcp_pkt.dst_port if tcp_pkt
+                            else udp_pkt.dst_port if udp_pkt
+                            else None)
+                pkt_size = len(msg.data)
+                self._classify_and_install(
+                    datapath, src_ip, in_port, ip_pkt, dst_port, pkt_size)
 
         # L2 포워딩 (return traffic + non-IP)
         actions = [parser.OFPActionOutput(out_port)]
@@ -258,15 +281,19 @@ class SliceController(app_manager.OSKenApp):
         datapath.send_msg(out)
 
     def _classify_and_install(self, datapath, src_ip: str,
-                               in_port: int, ip_pkt):
+                               in_port: int, ip_pkt,
+                               dst_port: int | None = None,
+                               pkt_size: int = 0):
         """새 클라이언트 hostname 분류 → S1 flow rule + 분류 캐시 등록."""
         hostname = self.ip_to_name.get(src_ip, "")
         service, is_rule_based = cfg.classify_hostname(hostname)
 
         if not is_rule_based and hostname:
-            # 모호한 hostname → Gemma3 비동기 판단 (즉시는 기본값 사용)
-            hub.spawn(self._gemma3_classify_async, src_ip, hostname,
-                      in_port, service, ip_pkt.proto)
+            # 모호한 hostname → Gemma4 비동기 판단 (즉시는 기본값 사용)
+            requirements = self.ip_to_requirements.get(src_ip, "")
+            hub.spawn(self._gemma4_classify_async, src_ip, hostname,
+                      in_port, service, ip_pkt.proto, requirements,
+                      dst_port, pkt_size)
 
         server   = cfg.get_server_for_service(service)
         queue_id = cfg.SERVICES[service]["queue_id"]
@@ -298,16 +325,23 @@ class SliceController(app_manager.OSKenApp):
             "Auto-classified: %s (%s) → %s via [%s] → %s%s",
             hostname or src_ip, src_ip, service.upper(),
             " → ".join(chain), server["name"],
-            " (Gemma3 pending)" if not is_rule_based else "")
+            " (Gemma4 pending)" if not is_rule_based else "")
 
-    def _gemma3_classify_async(self, src_ip: str, hostname: str,
+    def _gemma4_classify_async(self, src_ip: str, hostname: str,
                                 in_port: int, current_service: str,
-                                protocol: int):
-        """Gemma3로 모호한 hostname 비동기 분류. 결과 다르면 룰 재설치."""
+                                protocol: int, requirements: str = "",
+                                dst_port: int | None = None,
+                                pkt_size: int = 0):
+        """Gemma4로 모호한 hostname 비동기 분류. 결과 다르면 룰 재설치."""
         try:
             agent = _get_agent()
-            pkt_info = {"protocol": "UDP" if protocol == 17 else "TCP"}
-            gemma_service = agent.classify_new_host(hostname, pkt_info)
+            pkt_info = {
+                "protocol": "UDP" if protocol == 17 else "TCP",
+                "dst_port": dst_port,
+                "pkt_size": pkt_size,
+            }
+            gemma_service = agent.classify_new_host(hostname, pkt_info,
+                                                    requirements=requirements)
 
             if gemma_service and gemma_service != current_service:
                 server   = cfg.get_server_for_service(gemma_service)
@@ -316,6 +350,14 @@ class SliceController(app_manager.OSKenApp):
                 dp = self.datapaths.get(cfg.DPID_S1)
                 if dp:
                     parser = dp.ofproto_parser
+                    # 구 서비스 플로우 룰 삭제
+                    old_server = cfg.get_server_for_service(current_service)
+                    old_match = parser.OFPMatch(in_port=in_port,
+                                                eth_type=ether_types.ETH_TYPE_IP,
+                                                ipv4_src=src_ip,
+                                                ipv4_dst=old_server["ip"])
+                    self.delete_flow(dp, priority=10, match=old_match)
+                    # 새 서비스 플로우 룰 설치
                     match  = parser.OFPMatch(in_port=in_port,
                                               eth_type=ether_types.ETH_TYPE_IP,
                                               ipv4_src=src_ip,
@@ -332,13 +374,13 @@ class SliceController(app_manager.OSKenApp):
                         "sfc_chain":   chain,
                     })
                 self.host_service[src_ip] = gemma_service
-                self.logger.info("Gemma3 override: %s → %s (was %s)",
+                self.logger.info("Gemma4 override: %s → %s (was %s)",
                                  hostname, gemma_service, current_service)
             else:
-                self.logger.info("Gemma3 confirms: %s → %s",
+                self.logger.info("Gemma4 confirms: %s → %s",
                                  hostname, current_service)
         except Exception as e:
-            self.logger.warning("Gemma3 async classify failed: %s", e)
+            self.logger.warning("Gemma4 async classify failed: %s", e)
 
     # ------------------------------------------------------------------
     # 제어 메서드
@@ -363,6 +405,15 @@ class SliceController(app_manager.OSKenApp):
         dp = self.datapaths.get(cfg.DPID_S1)
         if dp and in_port:
             parser  = dp.ofproto_parser
+            # 구 서비스 플로우 룰 삭제 (from_service가 유효한 경우만)
+            if from_service in cfg.SERVICES:
+                old_server = cfg.get_server_for_service(from_service)
+                old_match  = parser.OFPMatch(in_port=in_port,
+                                              eth_type=ether_types.ETH_TYPE_IP,
+                                              ipv4_src=host_ip,
+                                              ipv4_dst=old_server["ip"])
+                self.delete_flow(dp, priority=10, match=old_match)
+            # 새 서비스 플로우 룰 설치
             match   = parser.OFPMatch(in_port=in_port,
                                        eth_type=ether_types.ETH_TYPE_IP,
                                        ipv4_src=host_ip,
@@ -389,9 +440,15 @@ class SliceController(app_manager.OSKenApp):
             "queue_id": queue_id, "status": "ok",
         }
 
-    def register_client(self, name: str, ip: str) -> dict:
+    def register_client(self, name: str, ip: str,
+                        requirements: str = "") -> dict:
         self.ip_to_name[ip] = name
-        self.logger.info("Registered: %s → %s", name, ip)
+        if requirements:
+            self.ip_to_requirements[ip] = requirements
+            self.logger.info("Registered: %s → %s (requirements: %s)",
+                             name, ip, requirements)
+        else:
+            self.logger.info("Registered: %s → %s", name, ip)
         return {"status": "ok", "name": name, "ip": ip}
 
     def get_slice_state(self) -> dict:
@@ -475,7 +532,8 @@ class SliceController(app_manager.OSKenApp):
                 return respond('200 OK', result)
             elif path == '/clients/register' and method == 'POST':
                 d = read_body()
-                return respond('200 OK', self.register_client(d['name'], d['ip']))
+                return respond('200 OK', self.register_client(
+                    d['name'], d['ip'], d.get('requirements', '')))
             else:
                 return respond('404 Not Found', {"error": "Not Found"})
         except (KeyError, ValueError) as e:
