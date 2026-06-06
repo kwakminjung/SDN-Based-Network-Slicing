@@ -28,6 +28,9 @@ from mininet.cli import CLI
 
 import config as cfg
 
+# 동적으로 할당된 IP를 추적 (h.IP()는 런타임 addHost 후 None 반환 버그 우회)
+_dynamic_ips: set[str] = set()
+
 
 def setup_qos(iface: str = cfg.BOTTLENECK_IFACE):
     """S1 → S_edge 병목 인터페이스에 HTB 큐 설정 (GBR/MBR 보장용)."""
@@ -89,10 +92,18 @@ def add_client(net, name: str, switch, ip: str = None,
         py add_client(net, 'device_01', s1)
         py add_client(net, 'device_01', s1, requirements='latency < 5ms, bandwidth 8Mbps')
     """
+    global _dynamic_ips
     if ip is None:
-        existing_dynamic = [h for h in net.hosts if h.IP() and h.IP().startswith("10.0.0.")]
-        idx = len(existing_dynamic) + 1
+        static_ips = (
+            {p["ip"] for p in cfg.HOST_PROFILES.values()}
+            | {s["ip"] for s in cfg.SERVERS.values()}
+        )
+        used = static_ips | _dynamic_ips
+        idx = 7
+        while f"10.0.0.{idx}" in used:
+            idx += 1
         ip = f"10.0.0.{idx}/24"
+        _dynamic_ips.add(f"10.0.0.{idx}")
 
     host = net.addHost(name, ip=ip)
     link = net.addLink(host, switch, bw=1000)

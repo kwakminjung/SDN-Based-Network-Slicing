@@ -146,7 +146,7 @@ Slice mMTC (목표: 1Mbps, 100ms, 5% 손실)
 
 #### Gemma4 연동 방식
 - **Ollama 로컬 실행** 사용
-- 모델: `gemma3` (ollama pull gemma3 완료)
+- 모델: `gemma4` (ollama pull gemma4 완료)
 - Ollama API 엔드포인트: `http://localhost:11434/api/generate`
 - API 키 불필요, 인터넷 불필요
 
@@ -156,7 +156,7 @@ import requests
 def ask_gemma(prompt: str) -> str:
     response = requests.post(
         "http://localhost:11434/api/generate",
-        json={"model": "gemma3", "prompt": prompt, "stream": False}
+        json={"model": "gemma4", "prompt": prompt, "stream": False}
     )
     return response.json()["response"]
 ```

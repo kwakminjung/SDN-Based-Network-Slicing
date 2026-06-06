@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-slicing_agent.py — Gemma3 기반 자율 슬라이싱 에이전트 (SFC 버전)
+slicing_agent.py — Gemma4 기반 자율 슬라이싱 에이전트 (SFC 버전)
 EC5209 Advanced Computer Networking, Spring 2026
 
-Gemma3가 실제로 개입하는 경우:
+Gemma4가 실제로 개입하는 경우:
   1. hostname prefix가 없거나 모호한 경우 (classify_new_host)
-     예) device_01, unknown_03 → Gemma3가 패킷 패턴 분석 후 슬라이스 결정
+     예) device_01, unknown_03 → Gemma4가 패킷 패턴 분석 후 슬라이스 결정
   2. SLA 위반 감지 시 재배정 결정 (run_once 루프)
   3. /slices/request 엔드포인트로 명시적 요청 (handle_service_request)
 
 hostname prefix가 명확한 경우 (vehicle_*, camera_*, sensor_*)는
-Gemma3를 호출하지 않고 즉시 규칙 기반으로 처리.
+Gemma4를 호출하지 않고 즉시 규칙 기반으로 처리.
 
 실행:
   python agent/slicing_agent.py           # 10초 주기 SLA 감시
@@ -98,7 +98,7 @@ def detect_violations(throughput: dict[str, float]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Gemma3 호출 (system / user 분리, /api/chat 엔드포인트)
+# Gemma4 호출 (system / user 분리, /api/chat 엔드포인트)
 # ---------------------------------------------------------------------------
 
 # ── 고정 system 프롬프트 ──────────────────────────────────────────────────
@@ -147,13 +147,13 @@ def ask_gemma(system: str, user: str) -> str | None:
             timeout=60,
         )
         resp.raise_for_status()
-        log.info("Gemma3 latency: %.2f s", time.perf_counter() - t0)
+        log.info("Gemma4 latency: %.2f s", time.perf_counter() - t0)
         return resp.json().get("message", {}).get("content", "")
     except requests.exceptions.ConnectionError:
         log.warning("Ollama 연결 실패 — localhost:11434 에서 실행 중인지 확인")
         return None
     except Exception as e:
-        log.warning("Gemma3 API 오류: %s", e)
+        log.warning("Gemma4 API 오류: %s", e)
         return None
 
 
@@ -174,7 +174,7 @@ def parse_json_response(response: str) -> dict | None:
 def classify_new_host(hostname: str,
                       pkt_info: dict | None = None,
                       requirements: str = "") -> str | None:
-    """hostname prefix로 분류 불가능한 경우 Gemma3에 판단 위임.
+    """hostname prefix로 분류 불가능한 경우 Gemma4에 판단 위임.
 
     hostname prefix가 명확한 경우는 컨트롤러에서 직접 처리하므로
     이 함수는 모호한 경우(device_01, unknown_03 등)에만 호출된다.
@@ -218,18 +218,18 @@ def classify_new_host(hostname: str,
         "Select the most appropriate slice based on the information above."
     )
 
-    log.info("Gemma3 분류 요청 (모호한 hostname): %s", hostname)
+    log.info("Gemma4 분류 요청 (모호한 hostname): %s", hostname)
     response = ask_gemma(_SYSTEM_CLASSIFY, user)
 
     if not response:
-        log.warning("Gemma3 미응답 — 기본값 mmtc 사용")
+        log.warning("Gemma4 미응답 — 기본값 mmtc 사용")
         return "mmtc"
 
     parsed = parse_json_response(response)
     if parsed:
         svc = parsed.get("service", "").lower()
         if svc in cfg.SERVICES:
-            log.info("Gemma3: %s → %s (%s)", hostname, svc, parsed.get("reason", ""))
+            log.info("Gemma4: %s → %s (%s)", hostname, svc, parsed.get("reason", ""))
             return svc
 
     return "mmtc"
@@ -265,7 +265,7 @@ def apply_reassignment(host_ip: str, to_service: str,
 
 def handle_service_request(host_ip: str, requested_service: str,
                              dry_run: bool = False) -> dict:
-    """명시적 서비스 요청 → Gemma3가 부하 기반으로 최적 배정 결정."""
+    """명시적 서비스 요청 → Gemma4가 부하 기반으로 최적 배정 결정."""
     if requested_service not in cfg.SERVICES:
         return {"action": "reject",
                 "reason": f"알 수 없는 서비스: {requested_service}",
@@ -303,13 +303,13 @@ def handle_service_request(host_ip: str, requested_service: str,
     )
 
     user = "\n".join(lines)
-    log.info("Gemma3 배정 판단 요청...")
+    log.info("Gemma4 배정 판단 요청...")
     response = ask_gemma(_SYSTEM_REQUEST, user)
 
     if response:
         action = parse_json_response(response)
     else:
-        log.warning("Gemma3 미응답 — 규칙 기반 폴백")
+        log.warning("Gemma4 미응답 — 규칙 기반 폴백")
         action = _rule_based_assignment(host_ip, requested_service, current_loads)
 
     if not action:
@@ -393,13 +393,13 @@ def run_once(dry_run: bool = False) -> None:
 
     ctrl_state = get_controller_state() or {}
     user       = build_sla_user(throughput, violations, ctrl_state)
-    log.info("Gemma3 SLA 복구 방안 요청...")
+    log.info("Gemma4 SLA 복구 방안 요청...")
     response = ask_gemma(_SYSTEM_SLA, user)
 
     if response:
         action = parse_json_response(response)
     else:
-        log.warning("Gemma3 미응답 — 룰 기반 폴백")
+        log.warning("Gemma4 미응답 — 룰 기반 폴백")
         action = _fallback_sla_action(violations)
 
     if not action:
@@ -427,13 +427,13 @@ def _fallback_sla_action(violations: list[dict]) -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SDN SFC Slicing Agent (Gemma3)")
+    parser = argparse.ArgumentParser(description="SDN SFC Slicing Agent (Gemma4)")
     parser.add_argument("--once",    action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     log.info("에이전트 시작 (모델: %s, 주기: %ds)", cfg.OLLAMA_MODEL, cfg.AGENT_INTERVAL_SEC)
-    log.info("Gemma3 개입 조건: 모호한 hostname | SLA 위반 | /slices/request 명시적 요청")
+    log.info("Gemma4 개입 조건: 모호한 hostname | SLA 위반 | /slices/request 명시적 요청")
 
     if args.once:
         run_once(dry_run=args.dry_run)
