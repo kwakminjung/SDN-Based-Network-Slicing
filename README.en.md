@@ -7,7 +7,8 @@ Minjung Kwak (20261053), Dept. of AI Convergence
 
 This project implements 5G-style network slicing for a smart city scenario using Mininet, os-ken (OpenFlow 1.3), and OVS HTB queuing.  
 The key idea is that **each slice physically traverses a different NFV chain (Service Function Chaining)**. Latency differentiation arises naturally from hop count differences, not from injected netem delays.  
-Clients do not specify a slice. The Gemma4 agent automatically assigns one based on hostname, traffic pattern, and client requirements.
+Clients do not specify a slice. The Gemma4 agent automatically assigns one based on hostname, traffic pattern, and client requirements.  
+QoS is **two-tiered**: OVS HTB queues enforce GBR/MBR rates, while IP-header **DSCP marking + Strict Priority** tc filters enforce inter-slice priority (URLLC > eMBB > mMTC).
 
 ---
 
@@ -49,13 +50,13 @@ mMTC:  S1 → S_edge → [nfv_fw] → [nfv_aggr]       → S_core → CityPulse 
 
 ## SLA Requirements (3GPP TS 23.501)
 
-| Slice | Server | GBR | MBR | PDB | PER | Use Case |
-|-------|--------|-----|-----|-----|-----|---------|
-| **URLLC** | AutoDrive Hub | 10 Mbps | 10 Mbps | 1 ms | 10⁻⁵ | Autonomous driving, V2X |
-| **eMBB** | EntertainPort | 20 Mbps | 50 Mbps | 100 ms | 10⁻⁶ | HD streaming, CCTV |
-| **mMTC** | CityPulse Hub | 1 Mbps | 10 Mbps | 300 ms | 10⁻² | IoT sensors, smart meters |
+| Slice | Server | DSCP | GBR | MBR | PDB | PER | Use Case |
+|-------|--------|------|-----|-----|-----|-----|---------|
+| **URLLC** | AutoDrive Hub | 46 (EF) | 10 Mbps | 10 Mbps | 1 ms | 10⁻⁵ | Autonomous driving, V2X |
+| **eMBB** | EntertainPort | 34 (AF41) | 20 Mbps | 50 Mbps | 100 ms | 10⁻⁶ | HD streaming, CCTV |
+| **mMTC** | CityPulse Hub | 0 (BE) | 1 Mbps | 10 Mbps | 300 ms | 10⁻² | IoT sensors, smart meters |
 
-HTB queues are used solely for GBR/MBR enforcement. netem is not used.
+HTB queues enforce GBR/MBR rates; DSCP enforces strict-priority between queues. netem is not used.
 
 ---
 
@@ -79,7 +80,7 @@ Clients do not select a slice manually. The slice is assigned automatically base
 | Network emulator | Mininet 2.3.0 |
 | SDN controller | os-ken 2.0.0 (OpenFlow 1.3) |
 | Python | 3.10.14 (pyenv virtualenv: `sdn-env`) |
-| Data plane / QoS | Open vSwitch 3.3.4 — HTB queuing (no netem) |
+| Data plane / QoS | Open vSwitch 3.3.4 — HTB queuing + DSCP Strict Priority (no netem) |
 | NFV | Python + scapy (promiscuous receive + forward) |
 | AI agent | Gemma4 via Ollama `/api/chat` (system/user role separation) |
 | Measurement | iperf v2 (UDP throughput), ping (RTT) |
@@ -105,12 +106,12 @@ SDN-Based-Network-Slicing/
 │   └── slice_controller.py      # SFC controller (3 switches + REST API)
 ├── agent/
 │   └── slicing_agent.py         # Gemma4 agent (classification + SLA monitoring)
-├── demo/
-│   ├── dashboard.py             # Real-time TUI (SFC path + GBR status)
-│   └── request_injector.py      # Interactive service request terminal
-└── measurement/
-    └── run_measurement.py       # Measurement script (GBR/MBR/PDB verification)
+└── demo/
+    ├── dashboard.py             # Real-time TUI (SFC path + GBR status)
+    └── request_injector.py      # Interactive service request terminal
 ```
+
+> Bandwidth measurement is done directly from the Mininet CLI with iperf v2 (see "Bandwidth Measurement" below).
 
 ---
 
@@ -176,22 +177,67 @@ in_port=nfv_aggr_port, dst=10.0.0.6 → output(s_core_port)
 
 Each NFV script receives a packet, logs it, and **re-sends it on the same interface**. S_edge identifies `in_port=nfv_port` and routes to the next hop.
 
-### HTB Queue Configuration (`s1-eth4`, S1 → S_edge)
+### HTB Queue + Strict Priority (`s1-eth4`, S1 → S_edge)
 
 ```
 HTB root (100 Mbps)
-├── Queue 0 / class 1:1 → URLLC (GBR=MBR=10 Mbps)
-├── Queue 1 / class 1:2 → eMBB  (GBR=20 Mbps, MBR=50 Mbps)
-└── Queue 2 / class 1:3 → mMTC  (GBR=1 Mbps,  MBR=10 Mbps)
+├── Queue 0 / class 1:1 → URLLC (GBR=MBR=10 Mbps,  prio=0 highest)
+├── Queue 1 / class 1:2 → eMBB  (GBR=20 Mbps, MBR=50 Mbps, prio=1)
+└── Queue 2 / class 1:3 → mMTC  (GBR=1 Mbps,  MBR=10 Mbps,  prio=2 default)
 ```
 
 No netem. Latency differences emerge naturally from the SFC hop count.
+
+---
+
+## DSCP Marking + Strict Priority
+
+QoS is two-tiered. HTB rates enforce GBR/MBR, and on top of that **DSCP-based strict-priority** enforces priority between queues.
+
+### Flow
+
+```
+S1 controller                       s1-eth4 (bottleneck)
+set_field(ip_dscp) → set_queue   →  tc u32 filter (match ip tos)
+URLLC → DSCP 46 (EF)             →  tos 0xb8 → flowid 1:1 (prio 0)
+eMBB  → DSCP 34 (AF41)           →  tos 0x88 → flowid 1:2 (prio 1)
+mMTC  → DSCP  0 (BE)             →  (default-queue 2, no filter)
+```
+
+1. **Marking**: the S1 flow rule stamps the DSCP into the IP header via `OFPActionSetField(ip_dscp=..)`, then enqueues and outputs to S_edge. `set_queue` is kept as an OVS HTB classification fallback.
+2. **Scheduling**: each HTB class on the bottleneck `s1-eth4` is given `other-config:priority`, and a tc u32 filter on the root (`1:0`) selects the queue by DSCP value.
+3. tc u32 has no `dscp` keyword, so it matches the ToS byte (`DSCP << 2`) via `match ip tos <tos> 0xfc` (the `0xfc` mask ignores the 2 ECN bits).
+
+> **Avoiding the OVS htb root conflict**: OVS manages the root htb qdisc (`handle 1:`) directly, so placing a separate prio qdisc at the root would conflict with it. Instead, the combination of **HTB class prio + DSCP u32 filter** achieves the same strict-priority effect.
+
+### `priority:high` Promotion
+
+If a client's `requirements` contains `priority:high`, its DSCP is promoted **one step up** the ladder (URLLC stays at the top, EF).
+
+```
+DSCP ladder:  mMTC(BE,0) < eMBB(AF41,34) < URLLC(EF,46)
+
+py add_client(net, 'device_01', s1, requirements='priority:high')
+  → mMTC(0) promoted → served from the eMBB(34) queue
+```
+
+Promoted packets are marked with the higher DSCP and scheduled from the correspondingly higher-priority queue.
+
+### Equivalent Manual tc Commands (reference)
+
+```bash
+tc filter add dev s1-eth4 protocol ip parent 1:0 prio 1 \
+    u32 match ip tos 0xb8 0xfc flowid 1:1   # DSCP 46 (EF)   → URLLC
+tc filter add dev s1-eth4 protocol ip parent 1:0 prio 2 \
+    u32 match ip tos 0x88 0xfc flowid 1:2   # DSCP 34 (AF41) → eMBB
+# DSCP 0 (BE) → falls through to default-queue 2, no filter needed
+```
 
 ### Flow Priority Table
 
 | Priority | Switch | Match | Action | Purpose |
 |----------|--------|-------|--------|---------|
-| 10 | S1 | `in_port + IP + src + dst` | `set_queue(n) + output(S_edge)` | HTB queue assignment |
+| 10 | S1 | `in_port + IP + src + dst` | `set_field(dscp) + set_queue(n) + output(S_edge)` | DSCP marking + HTB queue assignment |
 | 10 | S_edge | `in_port + IP + dst` | `output(next_hop)` | SFC transit routing |
 | 10 | S_core | `IP + dst` | `output(server_port)` | Server forwarding |
 | 1 | all | `in_port + eth_dst` | `output(port)` | L2 forwarding |
@@ -298,9 +344,9 @@ python -m os_ken.cmd.manager controller.slice_controller
 
 Expected startup log:
 ```
-S1 rule: vehicle_01 (10.0.0.1) queue=0 → [nfv_fw] → AutoDrive Hub
-S1 rule: camera_01  (10.0.0.2) queue=1 → [nfv_fw → nfv_cache] → EntertainPort
-S1 rule: sensor_01  (10.0.0.3) queue=2 → [nfv_fw → nfv_aggr] → CityPulse Hub
+S1 rule: vehicle_01 (10.0.0.1) queue=0 dscp=46 → [nfv_fw] → AutoDrive Hub
+S1 rule: camera_01  (10.0.0.2) queue=1 dscp=34 → [nfv_fw → nfv_cache] → EntertainPort
+S1 rule: sensor_01  (10.0.0.3) queue=2 dscp=0  → [nfv_fw → nfv_aggr] → CityPulse Hub
 REST API listening on port 8080
 ```
 
@@ -309,7 +355,6 @@ REST API listening on port 8080
 ```bash
 sudo mn -c                          # Clean up any leftover state from previous runs
 sudo python3 topology.py            # Mininet CLI mode
-sudo python3 topology.py --measure  # Automated measurement then exit
 ```
 
 NFV scripts start automatically when the topology is launched.
@@ -375,15 +420,20 @@ py add_client(net, 'camera_02',  s1)   # → 10.0.0.8, assigned eMBB
 
 # Ambiguous hostname + requirements → Gemma4 decides slice
 py add_client(net, 'device_01', s1, requirements='latency < 5ms, bandwidth 8Mbps')
+
+# priority:high → DSCP promoted one step up within the assigned slice
+py add_client(net, 'device_02', s1, requirements='priority:high')
 ```
 
 ### 8. Verification
 
 ```bash
-sudo ovs-ofctl -O OpenFlow13 dump-flows s1      # S1 HTB queue assignment rules
+sudo ovs-ofctl -O OpenFlow13 dump-flows s1      # S1 set_field(dscp) + queue assignment rules
 sudo ovs-ofctl -O OpenFlow13 dump-flows sedge   # S_edge SFC routing rules
 sudo ovs-ofctl -O OpenFlow13 dump-flows s_core  # S_core server forwarding rules
-tc -s class show dev s1-eth4                    # Live HTB queue statistics
+sudo ovs-vsctl list queue                       # min/max-rate + priority
+tc -s class show dev s1-eth4                    # Per-class prio / transmit stats
+tc -s filter show dev s1-eth4 parent 1:0        # DSCP u32 filter match counts
 curl localhost:8080/slices                      # Slice state + SFC chains + connections
 ```
 
@@ -448,3 +498,4 @@ OVS always sets the HTB default to Queue 0 regardless of the `default-queue` set
 |--------|---------|
 | `main` | Baseline implementation (S1–S2, HTB + netem, static slices) |
 | `feature/sfc` | **SFC-based redesign** — physical NFV transit + Gemma4 auto-classification + verified |
+| `feature/dscp-strict-priority` | **DSCP marking + Strict Priority** — IP-header DSCP (EF/AF41/BE) marking + HTB class prio + tc u32 filter, with `priority:high` promotion |
