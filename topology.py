@@ -32,38 +32,103 @@ _dynamic_ips: set[str] = set()
 
 
 def setup_qos(iface: str = cfg.BOTTLENECK_IFACE):
-    """S1 → S_edge 병목 인터페이스에 HTB 큐 설정 (GBR/MBR 보장용)."""
+    """S1 → S_edge 병목 인터페이스에 HTB 큐 + DSCP Strict Priority 설정.
+
+    2계층 QoS:
+      (1) HTB rate 보장 — 기존 GBR/MBR 수치 유지 (URLLC 10Mbps 고정,
+          eMBB 20~50Mbps, mMTC 1~10Mbps).
+      (2) Strict Priority 레이어 — HTB class 의 prio 파라미터(other-config:priority)
+          로 큐 간 우선순위를 부여하고, DSCP 값을 보고 큐를 고르는 tc u32 filter 를
+          root(1:0)에 얹는다. URLLC(EF/46) → 1:1 이 항상 최우선, eMBB(AF41/34) →
+          1:2, mMTC(BE/0) → 1:3(default) 순으로 처리된다.
+
+    참고: OVS 가 root htb qdisc(handle 1:)를 직접 관리하므로, 별도의 prio qdisc 를
+    root 로 두면 OVS 설정과 충돌한다. 대신 HTB class prio + DSCP u32 filter 조합으로
+    동일한 strict-priority 효과를 얻는다.
+    """
     info("*** Cleaning up existing QoS settings\n")
     subprocess.run(f"ovs-vsctl clear port {iface} qos",
                    shell=True, stderr=subprocess.DEVNULL)
     subprocess.run("ovs-vsctl --all destroy qos; ovs-vsctl --all destroy queue",
                    shell=True, stderr=subprocess.DEVNULL)
 
-    info(f"*** Setting up HTB QoS on {iface}\n")
+    info(f"*** Setting up HTB QoS + Strict Priority on {iface}\n")
     cmd = (
         f"ovs-vsctl set port {iface} qos=@q "
         f"-- --id=@q create QoS type=linux-htb "
         f"other-config:max-rate=100000000 "
         f"other-config:default-queue=2 "
         f"queues=0=@q0,1=@q1,2=@q2 "
-        # Queue 0: URLLC — GBR=MBR=10Mbps
+        # Queue 0: URLLC — GBR=MBR=10Mbps, priority=0 (최우선)
         f"-- --id=@q0 create Queue "
         f"other-config:min-rate=10000000 other-config:max-rate=10000000 "
-        # Queue 1: eMBB — GBR=20Mbps, MBR=50Mbps
+        f"other-config:priority=0 "
+        # Queue 1: eMBB — GBR=20Mbps, MBR=50Mbps, priority=1
         f"-- --id=@q1 create Queue "
         f"other-config:min-rate=20000000 other-config:max-rate=50000000 "
-        # Queue 2: mMTC — GBR=1Mbps, MBR=10Mbps
+        f"other-config:priority=1 "
+        # Queue 2: mMTC — GBR=1Mbps, MBR=10Mbps, priority=2 (최하위)
         f"-- --id=@q2 create Queue "
-        f"other-config:min-rate=1000000 other-config:max-rate=10000000"
+        f"other-config:min-rate=1000000 other-config:max-rate=10000000 "
+        f"other-config:priority=2"
     )
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    if result.returncode == 0:
-        info("*** HTB QoS setup complete (no netem — latency from SFC hop count)\n")
-        info("    Queue 0 (URLLC): GBR=MBR=10Mbps\n")
-        info("    Queue 1 (eMBB):  GBR=20Mbps, MBR=50Mbps\n")
-        info("    Queue 2 (mMTC):  GBR=1Mbps,  MBR=10Mbps\n")
-    else:
+    if result.returncode != 0:
         info(f"*** QoS setup failed: {result.stderr}\n")
+        return
+
+    info("*** HTB QoS setup complete (no netem — latency from SFC hop count)\n")
+    info("    Queue 0 (URLLC/EF  ): GBR=MBR=10Mbps, prio=0\n")
+    info("    Queue 1 (eMBB/AF41 ): GBR=20Mbps, MBR=50Mbps, prio=1\n")
+    info("    Queue 2 (mMTC/BE   ): GBR=1Mbps,  MBR=10Mbps, prio=2\n")
+
+    setup_dscp_filters(iface)
+
+
+def setup_dscp_filters(iface: str = cfg.BOTTLENECK_IFACE):
+    """DSCP → HTB class strict-priority 매핑 tc u32 filter 설치.
+
+    OVS htb root qdisc(handle 1:)에 filter 를 얹어, IP 헤더 DSCP 값으로 큐를
+    선택한다. tc u32 에는 'dscp' 키워드가 없으므로 ToS 바이트(DSCP<<2)를
+    'match ip tos <tos> 0xfc' 로 매칭한다(0xfc 마스크로 ECN 2비트 무시).
+
+    동등한 수동 명령 예시:
+      tc filter add dev s1-eth4 protocol ip parent 1:0 prio 1 \\
+          u32 match ip tos 0xb8 0xfc flowid 1:1   # DSCP 46 (EF)   → URLLC
+      tc filter add dev s1-eth4 protocol ip parent 1:0 prio 2 \\
+          u32 match ip tos 0x88 0xfc flowid 1:2   # DSCP 34 (AF41) → eMBB
+    """
+    info(f"*** Installing DSCP strict-priority filters on {iface}\n")
+    for fprio, (dscp, tos, htb_class, service) in enumerate(
+            cfg.get_dscp_filter_map(), start=1):
+        # DSCP 0(BE)은 default-queue(2)로 자연스럽게 떨어지므로 filter 생략.
+        if dscp == 0:
+            info(f"    DSCP {dscp:2d} ({service:5s}) → {htb_class} "
+                 f"(default-queue, filter 생략)\n")
+            continue
+        cmd = (
+            f"tc filter add dev {iface} protocol ip parent 1:0 prio {fprio} "
+            f"u32 match ip tos 0x{tos:02x} 0xfc flowid {htb_class}"
+        )
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if r.returncode == 0:
+            info(f"    DSCP {dscp:2d} ({service:5s}) → tos 0x{tos:02x} "
+                 f"→ flowid {htb_class}\n")
+        else:
+            info(f"    filter add 실패 (DSCP {dscp}): {r.stderr.strip()}\n")
+
+    # ----------------------------------------------------------------------
+    # 동작 확인 방법:
+    #   ovs-vsctl list qos                         # QoS row + queue 참조 확인
+    #   ovs-vsctl list queue                       # min/max-rate, priority 확인
+    #   tc -s qdisc show dev s1-eth4               # htb qdisc + 큐별 통계
+    #   tc -s class show dev s1-eth4               # class 별 prio / 전송 바이트
+    #   tc -s filter show dev s1-eth4 parent 1:0   # DSCP u32 filter 매칭 카운트
+    #   ovs-ofctl -O OpenFlow13 dump-flows s1      # set_field(dscp)/set_queue 확인
+    # 부하 테스트(슬라이스 격리):
+    #   mMTC/eMBB 포화 중 URLLC iperf3 가 10Mbps 를 유지하는지,
+    #   tc -s class show 의 URLLC(1:1) 우선 전송량으로 strict-priority 확인.
+    # ----------------------------------------------------------------------
 
 
 def register_client(name: str, ip: str, requirements: str = "") -> bool:

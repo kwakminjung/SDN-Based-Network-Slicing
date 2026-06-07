@@ -17,12 +17,19 @@ EC5209 Advanced Computer Networking, Spring 2026
 # PDB: Packet Delay Budget / PER: Packet Error Rate
 # queue_id: OVS HTB 큐 ID (0=urllc, 1=embb, 2=mmtc)
 # htb_class: tc class 핸들 (1:1, 1:2, 1:3)
+# dscp:     IP 헤더 DSCP 마킹 값 (6비트, 0~63)
+#             URLLC → 46 (EF,   Expedited Forwarding)
+#             eMBB  → 34 (AF41, Assured Forwarding 4-1)
+#             mMTC  →  0 (BE,   Best Effort)
+# htb_prio: HTB strict-priority 우선순위 (작을수록 우선, 0=최우선)
 # ---------------------------------------------------------------------------
 SERVICES = {
     "urllc": {
         "description": "Ultra-Reliable Low Latency (자율주행, V2X)",
         "queue_id": 0,
         "htb_class": "1:1",
+        "dscp": 46,          # EF
+        "htb_prio": 0,       # 최우선
         "gbr_mbps": 10,
         "mbr_mbps": 10,
         "pdb_ms": 1,
@@ -34,6 +41,8 @@ SERVICES = {
         "description": "Enhanced Mobile Broadband (HD 스트리밍, CCTV)",
         "queue_id": 1,
         "htb_class": "1:2",
+        "dscp": 34,          # AF41
+        "htb_prio": 1,
         "gbr_mbps": 20,
         "mbr_mbps": 50,
         "pdb_ms": 100,
@@ -45,6 +54,8 @@ SERVICES = {
         "description": "Massive Machine Type (IoT 센서, 스마트미터)",
         "queue_id": 2,
         "htb_class": "1:3",
+        "dscp": 0,           # BE
+        "htb_prio": 2,
         "gbr_mbps": 1,
         "mbr_mbps": 10,
         "pdb_ms": 300,
@@ -56,6 +67,49 @@ SERVICES = {
 
 # HTB class → service 역방향 조회
 CLASS_TO_SERVICE = {svc["htb_class"]: name for name, svc in SERVICES.items()}
+
+# ---------------------------------------------------------------------------
+# DSCP 우선순위 사다리 (낮음 → 높음). "priority:high" 요구 시 한 단계 승급.
+# mMTC(BE,0) < eMBB(AF41,34) < URLLC(EF,46)
+# ---------------------------------------------------------------------------
+DSCP_LADDER = [0, 34, 46]
+
+
+def get_dscp(service: str, high_priority: bool = False) -> int:
+    """슬라이스의 DSCP 마킹 값 반환.
+
+    high_priority=True 이면 DSCP 사다리에서 한 단계 위 값으로 승급한다
+    (URLLC는 이미 최상위 EF이므로 그대로 유지). Strict-Priority tc filter가
+    DSCP 값으로 큐를 고르므로, 승급된 패킷은 한 단계 높은 큐에서 처리된다.
+    """
+    base = SERVICES[service]["dscp"]
+    if not high_priority:
+        return base
+    if base in DSCP_LADDER:
+        i = DSCP_LADDER.index(base)
+        return DSCP_LADDER[min(i + 1, len(DSCP_LADDER) - 1)]
+    return base
+
+
+def dscp_to_tos(dscp: int) -> int:
+    """DSCP(6비트) → IP ToS 바이트 값 (DSCP를 상위 6비트로 시프트, ECN=0).
+    tc u32 'match ip tos' 가 ToS 바이트 전체를 보므로 이 변환이 필요하다.
+    예) DSCP 46(EF) → 0xB8, DSCP 34(AF41) → 0x88, DSCP 0(BE) → 0x00
+    """
+    return (dscp & 0x3F) << 2
+
+
+def get_dscp_filter_map() -> list[tuple]:
+    """topology.py 가 tc filter 를 만들 때 쓰는 (dscp, tos, htb_class, service).
+    DSCP 0(BE)은 default-queue 로 떨어지므로 명시 filter 에서 제외할 수 있으나,
+    명확성을 위해 함께 반환한다 (우선순위가 가장 낮은 filter prio 로 설치).
+    """
+    rows = []
+    for name, svc in SERVICES.items():
+        rows.append((svc["dscp"], dscp_to_tos(svc["dscp"]),
+                     svc["htb_class"], name))
+    # DSCP 큰 값(높은 우선순위)부터 filter prio 1, 2, 3 ...
+    return sorted(rows, key=lambda r: -r[0])
 
 # ---------------------------------------------------------------------------
 # 서버 정의 (S_core 스위치에 연결)

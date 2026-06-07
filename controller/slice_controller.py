@@ -63,6 +63,8 @@ class SliceController(app_manager.OSKenApp):
         self.ip_to_name: dict[str, str] = {}
         # 요구사항 레지스트리: ip → requirements 문자열
         self.ip_to_requirements: dict[str, str] = {}
+        # "priority:high" 요구한 클라이언트 ip 집합 (DSCP 한 단계 승급)
+        self.high_priority: set[str] = set()
         # 분류 캐시: ip → {name, service, server_ip, server_name, sfc_chain, in_port, ts}
         self.classified: dict[str, dict] = {}
         # 현재 호스트 서비스 배정 (재배정 반영)
@@ -104,6 +106,23 @@ class SliceController(app_manager.OSKenApp):
         )
         datapath.send_msg(mod)
 
+    def _slice_actions(self, parser, service: str, src_ip: str | None = None):
+        """슬라이스 egress 액션: DSCP 마킹 → 큐 배정 → S_edge 출력.
+
+        OFPActionSetField(ip_dscp=..) 로 IP 헤더 DSCP 를 마킹하면, 병목
+        인터페이스(s1-eth4)의 tc u32 filter 가 그 값으로 strict-priority 큐를
+        고른다. set_queue 는 OVS htb 분류의 fallback 으로 함께 둔다.
+        "priority:high" 등록 클라이언트는 DSCP 를 한 단계 승급한다.
+        """
+        svc  = cfg.SERVICES[service]
+        high = bool(src_ip) and src_ip in self.high_priority
+        dscp = cfg.get_dscp(service, high_priority=high)
+        return [
+            parser.OFPActionSetField(ip_dscp=dscp),
+            parser.OFPActionSetQueue(svc["queue_id"]),
+            parser.OFPActionOutput(cfg.S1_PORT_SEDGE),
+        ]
+
     # ------------------------------------------------------------------
     # OpenFlow 이벤트 핸들러
     # ------------------------------------------------------------------
@@ -136,23 +155,22 @@ class SliceController(app_manager.OSKenApp):
         """S1: 정적 클라이언트 → HTB 큐 배정 + S_edge 포워딩."""
         parser = datapath.ofproto_parser
         for in_port, src_ip, dst_ip, queue_id in cfg.get_s1_egress_rules():
+            svc_name = self._queue_to_service(queue_id)
             match   = parser.OFPMatch(in_port=in_port,
                                        eth_type=ether_types.ETH_TYPE_IP,
                                        ipv4_src=src_ip,
                                        ipv4_dst=dst_ip)
-            actions = [parser.OFPActionSetQueue(queue_id),
-                       parser.OFPActionOutput(cfg.S1_PORT_SEDGE)]
+            actions = self._slice_actions(parser, svc_name, src_ip)
             self.add_flow(datapath, priority=10, match=match, actions=actions)
 
             name    = self.ip_to_name.get(src_ip, src_ip)
-            service = cfg.SERVICES[self._queue_to_service(queue_id)]
-            server  = cfg.get_server_for_service(self._queue_to_service(queue_id))
-            chain   = " → ".join(cfg.get_sfc_chain(self._queue_to_service(queue_id)))
-            self.logger.info("S1 rule: %s (%s) queue=%d → [%s] → %s",
-                             name, src_ip, queue_id, chain, server["name"])
+            server  = cfg.get_server_for_service(svc_name)
+            chain   = " → ".join(cfg.get_sfc_chain(svc_name))
+            dscp    = cfg.get_dscp(svc_name, src_ip in self.high_priority)
+            self.logger.info("S1 rule: %s (%s) queue=%d dscp=%d → [%s] → %s",
+                             name, src_ip, queue_id, dscp, chain, server["name"])
 
             # 분류 캐시 등록
-            svc_name = self._queue_to_service(queue_id)
             self.classified[src_ip] = {
                 "name":        name,
                 "service":     svc_name,
@@ -299,14 +317,13 @@ class SliceController(app_manager.OSKenApp):
         queue_id = cfg.SERVICES[service]["queue_id"]
         chain    = cfg.get_sfc_chain(service)
 
-        # S1 flow rule 설치
+        # S1 flow rule 설치 (DSCP 마킹 + 큐 배정)
         parser = datapath.ofproto_parser
         match  = parser.OFPMatch(in_port=in_port,
                                   eth_type=ether_types.ETH_TYPE_IP,
                                   ipv4_src=src_ip,
                                   ipv4_dst=server["ip"])
-        actions = [parser.OFPActionSetQueue(queue_id),
-                   parser.OFPActionOutput(cfg.S1_PORT_SEDGE)]
+        actions = self._slice_actions(parser, service, src_ip)
         self.add_flow(datapath, priority=10, match=match, actions=actions)
 
         self.classified[src_ip] = {
@@ -345,7 +362,6 @@ class SliceController(app_manager.OSKenApp):
 
             if gemma_service and gemma_service != current_service:
                 server   = cfg.get_server_for_service(gemma_service)
-                queue_id = cfg.SERVICES[gemma_service]["queue_id"]
                 chain    = cfg.get_sfc_chain(gemma_service)
                 dp = self.datapaths.get(cfg.DPID_S1)
                 if dp:
@@ -357,13 +373,12 @@ class SliceController(app_manager.OSKenApp):
                                                 ipv4_src=src_ip,
                                                 ipv4_dst=old_server["ip"])
                     self.delete_flow(dp, priority=10, match=old_match)
-                    # 새 서비스 플로우 룰 설치
+                    # 새 서비스 플로우 룰 설치 (DSCP 마킹 + 큐 배정)
                     match  = parser.OFPMatch(in_port=in_port,
                                               eth_type=ether_types.ETH_TYPE_IP,
                                               ipv4_src=src_ip,
                                               ipv4_dst=server["ip"])
-                    actions = [parser.OFPActionSetQueue(queue_id),
-                               parser.OFPActionOutput(cfg.S1_PORT_SEDGE)]
+                    actions = self._slice_actions(parser, gemma_service, src_ip)
                     self.add_flow(dp, priority=10, match=match, actions=actions)
 
                 if src_ip in self.classified:
@@ -413,13 +428,12 @@ class SliceController(app_manager.OSKenApp):
                                               ipv4_src=host_ip,
                                               ipv4_dst=old_server["ip"])
                 self.delete_flow(dp, priority=10, match=old_match)
-            # 새 서비스 플로우 룰 설치
+            # 새 서비스 플로우 룰 설치 (DSCP 마킹 + 큐 배정)
             match   = parser.OFPMatch(in_port=in_port,
                                        eth_type=ether_types.ETH_TYPE_IP,
                                        ipv4_src=host_ip,
                                        ipv4_dst=server["ip"])
-            actions = [parser.OFPActionSetQueue(queue_id),
-                       parser.OFPActionOutput(cfg.S1_PORT_SEDGE)]
+            actions = self._slice_actions(parser, to_service, host_ip)
             self.add_flow(dp, priority=10, match=match, actions=actions)
 
         if host_ip in self.classified:
@@ -443,13 +457,20 @@ class SliceController(app_manager.OSKenApp):
     def register_client(self, name: str, ip: str,
                         requirements: str = "") -> dict:
         self.ip_to_name[ip] = name
+        # requirements 에 "priority:high" 포함 시 DSCP 한 단계 승급 대상으로 표시
+        high = "priority:high" in requirements.lower().replace(" ", "")
+        if high:
+            self.high_priority.add(ip)
+        else:
+            self.high_priority.discard(ip)
         if requirements:
             self.ip_to_requirements[ip] = requirements
-            self.logger.info("Registered: %s → %s (requirements: %s)",
-                             name, ip, requirements)
+            self.logger.info("Registered: %s → %s (requirements: %s%s)",
+                             name, ip, requirements,
+                             ", DSCP↑high" if high else "")
         else:
             self.logger.info("Registered: %s → %s", name, ip)
-        return {"status": "ok", "name": name, "ip": ip}
+        return {"status": "ok", "name": name, "ip": ip, "high_priority": high}
 
     def get_slice_state(self) -> dict:
         slices = {}
