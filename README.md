@@ -116,6 +116,9 @@ SDN-Based-Network-Slicing/
 
 ## 시스템 구조
 
+<img width="2352" height="1312" alt="image" src="https://github.com/user-attachments/assets/11e0daec-9b54-4b24-9dfe-3fccdce5afc7" />
+
+
 ```
 클라이언트 (vehicle_01)
         │ 첫 패킷 → Packet-In
