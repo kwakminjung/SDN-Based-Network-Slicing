@@ -449,5 +449,5 @@ OVS always sets the HTB default to Queue 0 regardless of the `default-queue` set
 
 | Branch | Contents |
 |--------|---------|
-| `main` | Baseline implementation (S1–S2, HTB + netem, static slices) |
-| `feature/sfc` | **SFC-based redesign** — physical NFV transit + Gemma4 auto-classification + verified |
+| `main` | SDN-based Network Slicing with Service Function Chaining (Completed 26.06.08) |
+| `feature/dscp-strict-priority` | DSCP Marking + Strict Priority -- IP Header DSCP (EF/AF41/BE) Marking + HTB Class Prio + tc u32 Filter: Upgrade to 'High' Priority (Future Work) |
