@@ -116,6 +116,9 @@ SDN-Based-Network-Slicing/
 
 ## System Architecture
 
+<img width="2352" height="1312" alt="image" src="https://github.com/user-attachments/assets/770b5657-f58a-4f3f-a0e0-39f97f4f9f33" />
+
+
 ```
 Client (vehicle_01)
         │ First packet → Packet-In
