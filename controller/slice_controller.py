@@ -104,6 +104,22 @@ class SliceController(app_manager.OSKenApp):
         )
         datapath.send_msg(mod)
 
+    def _install_fallback_rule(self, datapath, in_port):
+        """클라이언트 포트의 미분류 IP 트래픽을 mMTC(best-effort) 큐로 강제.
+
+        priority=5 — 특정 슬라이스 룰(10)보다 낮고 L2 학습 룰(1)보다 높다.
+        슬라이스 룰에 매칭되지 않는 트래픽(분류 지연 중이거나 다른 서버로
+        보낸 경우)이 OVS 기본큐(queue 0=URLLC)로 새는 것을 막는다.
+        ARP 등 non-IP은 eth_type 조건 때문에 걸리지 않아 L2로 정상 처리된다.
+        """
+        parser     = datapath.ofproto_parser
+        mmtc_queue = cfg.SERVICES["mmtc"]["queue_id"]
+        match = parser.OFPMatch(in_port=in_port,
+                                 eth_type=ether_types.ETH_TYPE_IP)
+        actions = [parser.OFPActionSetQueue(mmtc_queue),
+                   parser.OFPActionOutput(cfg.S1_PORT_SEDGE)]
+        self.add_flow(datapath, priority=5, match=match, actions=actions)
+
     # ------------------------------------------------------------------
     # OpenFlow 이벤트 핸들러
     # ------------------------------------------------------------------
@@ -163,6 +179,10 @@ class SliceController(app_manager.OSKenApp):
                 "ts":          time.time(),
                 "auto":        False,
             }
+
+        # 정적 클라이언트 포트별 fallback (미분류 IP → mMTC)
+        for profile in cfg.HOST_PROFILES.values():
+            self._install_fallback_rule(datapath, profile["s1_port"])
 
     def _install_sedge_sfc_rules(self, datapath):
         """S_edge: SFC 라우팅 룰 설치.
@@ -269,6 +289,13 @@ class SliceController(app_manager.OSKenApp):
 
         # L2 포워딩 (return traffic + non-IP)
         actions = [parser.OFPActionOutput(out_port)]
+        # 분류 전(FLOOD/학습 구간) 클라이언트 IP 트래픽이 포트 기본큐
+        # (queue 0=URLLC)로 새지 않도록 mMTC 큐를 미리 지정.
+        # slice(10)/fallback(5) 룰이 깔리기 전 과도기 보호.
+        if (dpid == cfg.DPID_S1 and ip_pkt
+                and in_port != cfg.S1_PORT_SEDGE):
+            actions = [parser.OFPActionSetQueue(
+                cfg.SERVICES["mmtc"]["queue_id"])] + actions
         if out_port != ofproto.OFPP_FLOOD:
             match = parser.OFPMatch(in_port=in_port, eth_dst=dst_mac)
             self.add_flow(datapath, priority=1, match=match,
@@ -308,6 +335,10 @@ class SliceController(app_manager.OSKenApp):
         actions = [parser.OFPActionSetQueue(queue_id),
                    parser.OFPActionOutput(cfg.S1_PORT_SEDGE)]
         self.add_flow(datapath, priority=10, match=match, actions=actions)
+
+        # fallback: 이 클라이언트 포트의 미분류 IP 트래픽 → mMTC(best-effort)
+        # 분류 지연/엉뚱한 서버 전송 시 URLLC 기본큐로 새는 것 방지
+        self._install_fallback_rule(datapath, in_port)
 
         self.classified[src_ip] = {
             "name":        hostname or src_ip,

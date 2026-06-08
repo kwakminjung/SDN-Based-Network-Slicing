@@ -18,7 +18,6 @@ HTB 큐는 GBR/MBR 보장 용도로만 사용.
 import subprocess
 import sys
 import os
-import time
 
 from mininet.net import Mininet
 from mininet.node import RemoteController, OVSSwitch
@@ -225,24 +224,6 @@ def create_topology():
     net.stop()
 
 
-def create_topology_and_measure():
-    """측정 모드."""
-    from measurement.run_measurement import run_measurement
-
-    net, s1 = build_network()
-    info("*** Waiting for controller to install flows...\n")
-    net.pingAll(timeout=2)
-    time.sleep(3)
-    net.pingAll(timeout=2)
-    time.sleep(2)
-
-    run_measurement(net)
-    net.stop()
-
-
 if __name__ == "__main__":
     setLogLevel("info")
-    if "--measure" in sys.argv:
-        create_topology_and_measure()
-    else:
-        create_topology()
+    create_topology()
