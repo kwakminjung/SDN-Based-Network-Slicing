@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-demo/dashboard.py — SDN SFC Slicing 실시간 대시보드
+demo/dashboard.py — SDN SFC Slicing real-time dashboard
 EC5209 Advanced Computer Networking, Spring 2026
 
-화면 구성:
-  ┌── 헤더 ─────────────────────────────────────────────┐
-  │  Active Connections (SFC 경로 포함)  │  Slice QoS   │
+Screen layout:
+  ┌── Header ───────────────────────────────────────────┐
+  │  Active Connections (incl. SFC path) │  Slice QoS   │
   ├──────────────────────────────────────┤              │
   │  Agent / Request Log                 │              │
   └──────────────────────────────────────┴──────────────┘
@@ -49,7 +49,7 @@ def add_log(msg: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 데이터 수집
+# Data collection
 # ---------------------------------------------------------------------------
 
 def read_tc_bytes() -> dict[str, int]:
@@ -92,7 +92,7 @@ def fetch_state() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# UI 구성
+# UI construction
 # ---------------------------------------------------------------------------
 
 def sla_status(svc_name: str, mbps: float) -> tuple[str, str]:
@@ -102,12 +102,12 @@ def sla_status(svc_name: str, mbps: float) -> tuple[str, str]:
     if mbps >= svc["gbr_mbps"] * cfg.SLA_MARGIN:
         return "✅ GBR OK", "green"
     if mbps >= svc["gbr_mbps"] * 0.5:
-        return "⚠️ 경고", "yellow"
-    return "❌ GBR 위반", "bold red"
+        return "⚠️ WARNING", "yellow"
+    return "❌ GBR VIOLATED", "bold red"
 
 
 def build_connections_table(ctrl_state: dict) -> Table:
-    """활성 연결 현황 — SFC 경로 포함."""
+    """Active connections — includes SFC path."""
     table = Table(
         title="[bold white]Active Connections (SFC Path)[/bold white]",
         box=box.ROUNDED,
@@ -115,15 +115,15 @@ def build_connections_table(ctrl_state: dict) -> Table:
         header_style="bold bright_white",
         expand=True,
     )
-    table.add_column("클라이언트",   width=14)
-    table.add_column("슬라이스",    width=8)
-    table.add_column("SFC 경로",    width=30)
-    table.add_column("서버",        width=17)
+    table.add_column("Client",     width=14)
+    table.add_column("Slice",      width=8)
+    table.add_column("SFC Path",   width=30)
+    table.add_column("Server",     width=17)
 
     connections = ctrl_state.get("connections", [])
 
     if not connections:
-        table.add_row("[dim]연결 없음[/dim]", "", "", "")
+        table.add_row("[dim]No connections[/dim]", "", "", "")
     else:
         for conn in connections:
             svc   = conn.get("service", "mmtc")
@@ -132,7 +132,7 @@ def build_connections_table(ctrl_state: dict) -> Table:
             label = SLICE_LABEL.get(svc, svc)
 
             chain = conn.get("sfc_chain", [])
-            # 예: [nfv_fw] → [nfv_cache] → s_core
+            # e.g.: [nfv_fw] → [nfv_cache] → s_core
             chain_str = " → ".join(f"\\[{n}]" for n in chain) + " → s_core"
 
             table.add_row(
@@ -146,7 +146,7 @@ def build_connections_table(ctrl_state: dict) -> Table:
 
 
 def build_slice_table(throughput: dict, ctrl_state: dict) -> Table:
-    """슬라이스별 GBR 달성 현황."""
+    """Per-slice GBR achievement status."""
     table = Table(
         title="[bold white]Slice QoS (GBR/MBR)[/bold white]",
         box=box.ROUNDED,
@@ -154,7 +154,7 @@ def build_slice_table(throughput: dict, ctrl_state: dict) -> Table:
         header_style="bold bright_white",
         expand=True,
     )
-    table.add_column("슬라이스", width=8)
+    table.add_column("Slice",   width=8)
     table.add_column("GBR",     width=10)
     table.add_column("Mbps",    justify="right", width=8)
     table.add_column("SLA",     width=13)
@@ -183,7 +183,7 @@ def build_slice_table(throughput: dict, ctrl_state: dict) -> Table:
 def build_log_panel() -> Panel:
     with _log_lock:
         lines = list(agent_log)
-    body = "\n".join(lines) if lines else "[dim]에이전트 대기 중...[/dim]"
+    body = "\n".join(lines) if lines else "[dim]Waiting for agent...[/dim]"
     return Panel(body,
                  title="[bold yellow]Agent / Request Log[/bold yellow]",
                  border_style="yellow", expand=True)
@@ -192,7 +192,7 @@ def build_log_panel() -> Panel:
 def build_help_panel(any_traffic: bool) -> Panel:
     if not any_traffic:
         notice = (
-            "[bold yellow]⚡ 트래픽 없음 — Mininet CLI에서:[/bold yellow]\n"
+            "[bold yellow]⚡ No traffic — in the Mininet CLI:[/bold yellow]\n"
             "  [white]autodrive    iperf3 -s -p 5001 &[/white]\n"
             "  [white]ent_port iperf3 -s -p 5002 &[/white]\n"
             "  [white]citypulse    iperf3 -s -p 5003 &[/white]\n"
@@ -205,16 +205,16 @@ def build_help_panel(any_traffic: bool) -> Panel:
 
     txt = (
         notice +
-        "[bold cyan]SFC 체인 확인[/bold cyan]\n"
+        "[bold cyan]SFC chains[/bold cyan]\n"
         "  URLLC: S1 → [nfv_fw]                → s_core → AutoDrive Hub\n"
         "  eMBB:  S1 → [nfv_fw] → [nfv_cache]  → s_core → EntertainPort\n"
         "  mMTC:  S1 → [nfv_fw] → [nfv_aggr]   → s_core → CityPulse Hub\n\n"
-        "[bold cyan]동적 클라이언트 (Mininet CLI)[/bold cyan]\n"
+        "[bold cyan]Dynamic clients (Mininet CLI)[/bold cyan]\n"
         "  [white]py vehicle_02 = add_client(net, 'vehicle_02', s1)[/white]\n"
         "  [white]py camera_02  = add_client(net, 'camera_02',  s1)[/white]"
     )
     border = "yellow" if not any_traffic else "dim"
-    return Panel(txt, title="[bold]안내[/bold]", border_style=border, expand=True)
+    return Panel(txt, title="[bold]Help[/bold]", border_style=border, expand=True)
 
 
 def build_layout(throughput: dict, ctrl_state: dict, conn_ok: bool) -> Layout:
@@ -234,7 +234,7 @@ def build_layout(throughput: dict, ctrl_state: dict, conn_ok: bool) -> Layout:
     )
 
     ts      = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    conn_str = "[green]●[/green] 컨트롤러 연결됨" if conn_ok else "[red]●[/red] 컨트롤러 오프라인"
+    conn_str = "[green]●[/green] Controller connected" if conn_ok else "[red]●[/red] Controller offline"
     layout["header"].update(Panel(
         Text.from_markup(
             f"[bold bright_blue]SDN Smart City SFC Slicing Dashboard[/bold bright_blue]"
@@ -250,12 +250,12 @@ def build_layout(throughput: dict, ctrl_state: dict, conn_ok: bool) -> Layout:
 
 
 # ---------------------------------------------------------------------------
-# 메인
+# Main
 # ---------------------------------------------------------------------------
 
 def main():
     console = Console()
-    add_log("[bold green]대시보드 시작[/bold green]")
+    add_log("[bold green]Dashboard started[/bold green]")
 
     with Live(console=console, refresh_per_second=0.5, screen=True) as live:
         time.sleep(BW_SAMPLE_SEC)
@@ -270,7 +270,7 @@ def main():
             except KeyboardInterrupt:
                 break
             except Exception as e:
-                add_log(f"[red]오류: {e}[/red]")
+                add_log(f"[red]Error: {e}[/red]")
                 time.sleep(REFRESH_INTERVAL)
 
 
