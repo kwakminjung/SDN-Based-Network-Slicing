@@ -80,7 +80,7 @@ Clients do not select a slice manually. The slice is assigned automatically base
 | SDN controller | os-ken 2.0.0 (OpenFlow 1.3) |
 | Python | 3.10.14 (pyenv virtualenv: `sdn-env`) |
 | Data plane / QoS | Open vSwitch 3.3.4 — HTB queuing (no netem) |
-| NFV | Python + scapy (promiscuous receive + forward) |
+| NFV | Python + AF_PACKET raw socket (promiscuous receive + line-rate forward) |
 | AI agent | Gemma4 via Ollama `/api/chat` (system/user role separation) |
 | Measurement | iperf v2 (UDP throughput), ping (RTT) |
 | Dashboard | Python rich (real-time SFC path display) |
@@ -96,7 +96,7 @@ SDN-Based-Network-Slicing/
 ├── config.py                    # SFC chain definitions, slice policies, hostname rules
 ├── topology.py                  # 3-switch topology (S1 + S_edge + S_core + NFV hosts)
 ├── nfv/
-│   ├── nfv_base.py              # Shared NFV logic (scapy promiscuous + log + forward)
+│   ├── nfv_base.py              # Shared NFV logic (raw-socket line-rate forwarder + sampled log + forward)
 │   ├── nfv_fw.py                # Firewall NFV
 │   ├── nfv_cache.py             # Cache NFV (eMBB only)
 │   └── nfv_aggr.py              # Aggregation NFV (mMTC only)
@@ -148,7 +148,7 @@ Client (vehicle_01)
 │  S_core: server forwarding                           │
 └──────┬──────────────────────────────────────────────┘
        │
-       ├─ [nfv_fw]    ← all slices transit (scapy recv + log + forward)
+       ├─ [nfv_fw]    ← all slices transit (raw-socket recv + log + forward)
        ├─ [nfv_cache] ← eMBB only
        └─ [nfv_aggr]  ← mMTC only
 ```
@@ -283,15 +283,14 @@ Gemma4 override: device_01 → urllc (was mmtc)
 ```bash
 pyenv activate sdn-env
 
-# scapy — required by NFV scripts (must be installed as a system package)
-sudo apt install python3-scapy
+# NFV forwarders use only the Python standard library (AF_PACKET raw socket),
+# so no extra package is required. (The earlier version used scapy but was
+# rewritten to raw sockets for line-rate forwarding.)
 
 # Ollama + Gemma4 (required for the agent)
 ollama serve &
 ollama pull gemma4
 ```
-
-> **Note**: scapy runs inside Mininet network namespaces using the system Python interpreter. Use `sudo apt install python3-scapy` instead of `pip install scapy`.
 
 ### 1. Controller (Terminal 1, non-root)
 
@@ -394,16 +393,28 @@ curl localhost:8080/slices                      # Slice state + SFC chains + con
 
 ## Measurement Results
 
-iperf v2 UDP, 2026-06-05 (RISENUC15-01):
+iperf v2 UDP, **3-slice concurrent saturation**, mean of 3 runs, 2026-06-07 (RISENUC15-01).
 
-| Slice | GBR | Measured (Mbps) | SLA |
-|-------|-----|----------------|-----|
-| URLLC | 10 Mbps | **10.00** | ✅ GBR OK |
-| eMBB | 20 Mbps | **32.47** | ✅ GBR OK |
-| mMTC | 1 Mbps | **5.42** | ✅ GBR OK |
+### Throughput isolation (slicing ON vs OFF)
 
-- URLLC is capped at GBR=MBR=10 Mbps, confirming exact rate enforcement.
-- eMBB and mMTC both exceed GBR while staying below MBR, confirming correct HTB isolation.
+| Slice | GBR | MBR | Offered | ON (Mbps) | OFF (Mbps) | Note |
+|-------|-----|-----|---------|-----------|------------|------|
+| URLLC | 10 | 10 | 10 | **9.76** | 10.5 | GBR=MBR=10 (floor & ceiling) |
+| eMBB | 20 | 50 | 80 | **48.7** | 43.4 | converges to MBR (50) |
+| mMTC | 1 | 10 | 80 | **9.76** | 43.4 | OFF exceeds MBR by 4.3x |
+
+- Under slicing ON every slice is enforced within its MBR ceiling. In particular mMTC exceeds its MBR by 4.3x when OFF but is isolated to 10 Mbps when ON.
+- iperf goodput cross-validated against the tc HTB counter at the bottleneck interface (`s1-eth4`) agrees within ±5% (L2 overhead 3–4.5%).
+
+### Latency isolation (URLLC RTT while competing slices saturate)
+
+| Condition | URLLC RTT (ms) | Jitter (ms) | Loss |
+|-----------|----------------|-------------|------|
+| Slicing ON | **0.13 ± 0.04** | 0.12 | 0% |
+| Slicing OFF | **13.30 ± 0.56** | 1.83 | 0% |
+
+- About 105x latency isolation. Note this figure is **in Mininet emulation**: the OFF-case 13.30 ms comes from single-FIFO queue buildup, not physical 5G latency.
+- Idle RTT between slices scales with SFC hop count (1-hop URLLC 0.29 ms < 2-hop eMBB 0.43 ms · mMTC 0.49 ms), arising purely from path structure with no netem injection. The gaps are of the same order as the jitter, so they are read as a directional structural effect.
 
 ---
 
@@ -414,15 +425,15 @@ iperf v2 UDP, 2026-06-05 (RISENUC15-01):
 iperf3 fails at the cookie handshake step in Mininet.  
 **Fix**: Use **iperf v2**, which has no cookie handshake and works reliably in Mininet.
 
-### scapy Installation
+### NFV Forwarder Performance (scapy → raw socket)
 
-NFV scripts run under the system Python interpreter inside Mininet namespaces.  
-**Fix**: `sudo apt install python3-scapy` to install as a system package.
+The earlier NFV used scapy `sniff`/`sendp` plus per-packet logging, which saturated at a few thousand pps and made the NFV itself a bottleneck and loss source under load.  
+**Fix**: Rewrote it as an AF_PACKET raw-socket `recv`/`send` loop with 1/N sampled logging removed from the hot path (`nfv/nfv_base.py`). It uses only the standard library (no install needed), and since the NFV is no longer a loss source the measurements reflect only the slicing effect.
 
 ### NFV Re-receive Loop Prevention
 
-When scapy re-sends a packet on the same interface, it would normally be sniffed again, creating a loop.  
-**Fix**: `filter="ip and not ether src {own_mac}"` — packets whose Ethernet source is the NFV's own MAC are ignored.
+When a frame is re-sent on the same interface, the NFV would otherwise receive its own frame again, creating a loop.  
+**Fix**: On re-send the src MAC is rewritten to the NFV's own, and any received frame whose src MAC equals its own (`frame[6:12] == own_mac`) is ignored.
 
 ### ovs-ofctl OpenFlow Version Mismatch
 
